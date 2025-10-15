@@ -67,7 +67,7 @@ export default (driver) => ({
                 tryVolumes,
                 tryChapters,
                 toInc,
-                firstIter
+                firstIter    // Has Volume Changed?
             ] = resetParams()
         }
 
