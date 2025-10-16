@@ -47,7 +47,7 @@ export default (driver) => ({
         return results
     },
 
-    getBookStructure: async (book) => {
+    getBookStructure: async (book) => { // digitizeMap
         await driver.go(book)
         const firstCh = Url.fromString(await (await driver.page.$('.volume-element:last-child > div > div:last-child a')).getAttribute('href'))
 
