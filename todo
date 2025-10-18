@@ -1,9 +1,10 @@
-- scraping volumi/capitoli prendendo info dal layout html, prendi tutti url capitoli
-- suddividere le due logiche scraping default / brute
-- aggiustare log / errori, debug log nascosti, colori errori, log visibili (Downloading Chap.1, Searching for Vol.3) ...
-- refactory
+X scraping volumi/capitoli prendendo info dal layout html, prendi tutti url capitoli
+X suddividere le due logiche scraping default / brute
+X aggiustare log / errori, debug log nascosti, log visibili (Downloading Chap.1, Searching for Vol.3) ...
+X refactory
 - aggiungere nuovo connettore (manga, più semplice da implementare)
 - aggiungere connettore annas archive (attenzione a compatibilità manga (vol, chap) vs libro (vol || chap))
+- aggiungere proxy
 - aggiungi lingue (tutte)
 
 - .env con tutti gli endpoint dei connector, encode in base64 e deploy in gist

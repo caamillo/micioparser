@@ -1,140 +1,128 @@
 import { childText, childrenText, childAttribute, Url } from "../utils.js"
+import log from "../log.js"
 
-const ENDPOINT_URL = 'https://mangaworld.cx' 
+const ENDPOINT_URL = 'https://mangaworld.cx'
 const CDN_ENDPOINT_URL = 'https://cdn.mangaworld.cx'
 
 export default (driver) => ({
     ...driver,
     name: 'mangaworld',
-
+   
     search: async (title) => {
+        log.info('Starting manga search', { title, source: 'mangaworld' })
+        
         let url = new Url(ENDPOINT_URL, ["archive"], "", {
             "keyword": title,
             "page": 1
         })
-
+        
         await driver.page.goto(url.render())
+        log.debug('Navigated to search page', { url: url.render() })
+        
         const pages = parseInt(await (await driver.page.$('.page-item.last > a.page-link')).textContent())
+        log.info('Found search result pages', { totalPages: pages, title })
+        
         const results = []
-
+        
         for (let i = 0; i < pages; i++) {
             url = new Url(ENDPOINT_URL, ["archive"], "", {
                 "keyword": title,
                 "page": i + 1
             })
-            console.log(url.render())
+            
+            log.debug('Fetching search page', { page: i + 1, totalPages: pages, url: url.render() })
             await driver.page.goto(url.render())
+            
             const entries = await driver.page.$$('.comics-grid > .entry')
-            results.push(...await Promise.all(
-                entries.map(async entry => ({
-                    link: await childAttribute(entry, 'a.thumb', 'href'),
-                    banner: await childAttribute(entry, 'a.thumb > img', 'src'),
-                    title: await childText(entry, '.manga-title'),
-                    type: await childText(entry, '.genre > a'),
-                    author: await childText(entry, '.author > a'),
-                    artist: await childText(entry, '.artist > a'),
-                    genres: await childrenText(entry, '.genres > a'),
-                    short_plot: await entry.$eval('.story', el => {
-                        const clone = el.cloneNode(true)
-                        clone.querySelector('span').remove()
-                        return clone.textContent.trim()
-                    })
-                }))
-            ))
+            log.debug('Found entries on page', { page: i + 1, entriesCount: entries.length })
+            
+            const pageResults = await Promise.all(
+                entries.map(async entry => {
+                    try {
+                        return {
+                            link: await childAttribute(entry, 'a.thumb', 'href'),
+                            banner: await childAttribute(entry, 'a.thumb > img', 'src'),
+                            title: await childText(entry, '.manga-title'),
+                            type: await childText(entry, '.genre > a'),
+                            author: await childText(entry, '.author > a'),
+                            artist: await childText(entry, '.artist > a'),
+                            genres: await childrenText(entry, '.genres > a'),
+                            short_plot: await entry.$eval('.story', el => {
+                                const clone = el.cloneNode(true)
+                                clone.querySelector('span').remove()
+                                return clone.textContent.trim()
+                            })
+                        }
+                    } catch (error) {
+                        log.error('Failed to parse entry', error, { page: i + 1 })
+                        return null
+                    }
+                })
+            )
+            
+            // Filter out any null results from failed parsing
+            const validResults = pageResults.filter(r => r !== null)
+            results.push(...validResults)
+            
+            log.success('Processed search page', { 
+                page: i + 1, 
+                totalPages: pages,
+                resultsOnPage: validResults.length,
+                totalResults: results.length 
+            })
         }
+       
+        log.success('Search completed', { 
+            title, 
+            totalResults: results.length,
+            totalPages: pages 
+        })
         
-        console.log('Done!')
         return results
     },
-
-    getBookStructure: async (book) => { // digitizeMap
-        await driver.go(book)
-        const firstCh = Url.fromString(await (await driver.page.$('.volume-element:last-child > div > div:last-child a')).getAttribute('href'))
-
-        if (firstCh) await driver.page.goto(firstCh.render())
-        else throw new Error("First charapter not found.")
-
-        let page = Url.fromString(await (await driver.page.$('#page .img-fluid')).getAttribute('src'))
-        page.editRoute(2, { type: "counter" })
-        page.editRoute(3, { type: "counter" })
-        const MAX_TO_INC = 10
-
-        const resetParams = () =>
-            [ true, true, Array(2).fill(MAX_TO_INC), true ]
-        let [ tryVolumes, tryChapters, toInc, firstIter ] = resetParams()
-        const resetLocal = () => {
-            [
-                tryVolumes,
-                tryChapters,
-                toInc,
-                firstIter    // Has Volume Changed?
-            ] = resetParams()
-        }
-
-        while (page) {
-            try {
-                console.log('a')
-                const res = await driver.page.goto(page.render())
-                console.log("trying:", page.render())
-                if (!res.ok()) throw ""
-                resetLocal()
-                console.log('Page', page.render(), 'works!')
-                page.incFile()
-                await driver.page.screenshot({ path: 'out.png', fullPage: true })
-            } catch {
-                console.log(toInc, tryChapters, tryVolumes)
-                console.log('firstIter', firstIter)
-                const [ _a, _b, volume, chapter ] = page.routes
-                let modifying
-
-                if (tryChapters) {
-                    modifying = chapter
-                    if (toInc[0]) {
-                        chapter.inc()
-                        toInc[0]--
-                    } else {
-                        tryChapters = false
-                        toInc = Array(2).fill(MAX_TO_INC)
-                        firstIter = true
-                        console.log('firstIter', firstIter)
-                        modifying = volume
-                        chapter.inc(-MAX_TO_INC)
+    
+    getAllChapterLinks: async () => {
+        log.debug('Retrieving all chapter links')
+        
+        try {
+            const anchors = await driver.page.$$('.chapters-wrapper a.chap')
+            log.debug('Found chapter anchors', { count: anchors.length })
+            
+            const links = await Promise.all(
+                anchors.map(async a => {
+                    try {
+                        const href = await a.getAttribute('href')
+                        return Url.fromString(href)
+                    } catch (error) {
+                        log.error('Failed to get chapter link', error)
+                        return null
                     }
-                } else if (tryVolumes) {
-                    modifying = volume
-                    if (toInc[0] || toInc[1]) {
-                        console.log(1, 1, volume.value)
-                        if (!toInc[0]) {
-                            volume.inc();
-                            chapter.inc(-MAX_TO_INC)
-                            toInc[1]--;
-                            toInc[0] = MAX_TO_INC
-                        }
-                        console.log(2, 2, volume.value)
-                        chapter.inc()
-                        toInc[0]--
-                    } else tryVolumes = false
-                } else {
-                    page = null
-                    continue
-                }
-                console.log('firstIter', firstIter)
-                if (firstIter) {
-                    page.resetFile()
-                    let route = modifying.value
-                    let idx = route.slice(route.indexOf('-') + 1)
-                    idx = idx.slice(0, idx.indexOf('-'))
-                    idx = String(parseInt(idx) + 1).padStart(2, 0)
-                    console.log("!!!!!!!!!!!!!! CHANGED IDX TO", idx, "!!!!!!!!!!!!!!!!!")
-                    modifying.edit({
-                        value: modifying.value.slice(0, modifying.value.indexOf('-') + 1) + idx + modifying.value.slice(modifying.value.lastIndexOf('-'))
-                    })
-                    firstIter = false
-                }
-            }
+                })
+            )
+            
+            const validLinks = links.filter(link => link !== null)
+            log.success('Retrieved chapter links', { count: validLinks.length })
+            
+            return validLinks
+        } catch (error) {
+            log.error('Failed to get all chapter links', error)
+            throw error
         }
     },
-
+    
+    getChapterLink: async () => {
+        log.debug('Retrieving chapter image link')
+        
+        try {
+            const imgSrc = await (await driver.page.$('#page .img-fluid')).getAttribute('src')
+            log.debug('Found chapter image', { src: imgSrc })
+            return imgSrc
+        } catch (error) {
+            log.error('Failed to get chapter image link', error)
+            throw error
+        }
+    },
+   
     ENDPOINT_URL,
     CDN_ENDPOINT_URL
 })

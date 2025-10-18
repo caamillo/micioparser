@@ -84,8 +84,6 @@ export class Url {
             else args = fileGroup
         }
         if (argsGroup && !args) args = argsGroup
-       
-        console.log({ domain, routes, file, args })
         
         // Reset all properties
         this.domain = domain
