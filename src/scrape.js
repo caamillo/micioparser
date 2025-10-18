@@ -2,7 +2,7 @@ import { Url } from "./utils.js"
 import log from "./log.js"
 import { parseOutputOptions } from "./path.js"
 
-async function scrapeChapter(driver, chapterUrl, chapterIndex, pathParser, volumeIndex = null) {
+async function scrapeChapter(driver, chapterUrl, chapterIndex, pathParser, options = {}) {
     log.chapterStart(chapterIndex, chapterUrl.render())
     
     try {
@@ -24,14 +24,13 @@ async function scrapeChapter(driver, chapterUrl, chapterIndex, pathParser, volum
                 if (!res.ok()) throw new Error("Page not found")
                 
                 const outputPath = await pathParser.resolveAndEnsure({
-                    vol: volumeIndex || chapterIndex,
                     chap: chapterIndex,
                     page: pageNum
                 })
                 
-                await driver.page.screenshot({ 
-                    path: outputPath, 
-                    fullPage: true 
+                await driver.page.screenshot({
+                    path: outputPath,
+                    fullPage: true
                 })
                 
                 pages.push({ url: page.render(), path: outputPath })
@@ -46,11 +45,11 @@ async function scrapeChapter(driver, chapterUrl, chapterIndex, pathParser, volum
         return { chapterIndex, chapterUrl: chapterUrl.render(), pages }
     } catch (error) {
         log.chapterError(chapterIndex, error, chapterUrl.render())
-        return { 
-            chapterIndex, 
-            chapterUrl: chapterUrl.render(), 
-            pages: [], 
-            error: error.message 
+        return {
+            chapterIndex,
+            chapterUrl: chapterUrl.render(),
+            pages: [],
+            error: error.message
         }
     }
 }
@@ -332,6 +331,7 @@ async function normalizeResult(coreFn, rawResult, startUrl, mode) {
 
 export async function processSingle(coreFn, driver, options = {}) {
     log.info('Starting single processing', { method: coreFn.name })
+    driver = Array.isArray(driver) ? driver[0] : driver
     
     await driver.go(options?.startUrl)
     const raw = await coreFn(driver, options)
