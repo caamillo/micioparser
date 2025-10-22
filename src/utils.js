@@ -122,7 +122,7 @@ export class Url {
         this.file = file
     }
     incFile() {
-        if (!this.file) return
+        if (!this.file) this.resetFile()
 
         let n = this.file.split('').filter(el => !isNaN(el)).join('')
         if (!n.length) return
@@ -133,12 +133,7 @@ export class Url {
         this.file = '/' + n + this.file.slice(this.file.indexOf('.'))
     }
     resetFile() {
-        if (!this.file) return
-
-        let n = this.file.split('').filter(el => !isNaN(el)).join()
-        if (!n.length) return
-
-        this.file = '/' + 1 + this.file.slice(this.file.indexOf('.'))
+        this.file = '/' + 1 + this.file ? this.file.slice(this.file.indexOf('.')) : '.jpg'
     }
     AddArgs(args) {
         this.args = { ...this.args, ...args }

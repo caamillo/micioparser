@@ -84,14 +84,14 @@ export default (driver) => ({
                     if (!chapBtn) continue
                     
                     await chapBtn.click()
-                    console.log('miao')
+                    await driver.page.waitForTimeout(1000)
 
-                    const langLis = await chap.$$('ul > li') || []
+                    const langLis = await chap.$$('ul > li')
                     if (langLis.length === 0) continue
 
                     const chosen = langLis[lang_idx] || langLis[0]
                     const anchor = await chosen.$('a')
-                    console.log(anchor)
+                    
                     if (anchor) {
                         const href = await anchor.getAttribute('href') || ''
                         const absolute = href.startsWith('http') ? href : ENDPOINT_URL + href
@@ -112,24 +112,7 @@ export default (driver) => ({
     },
 
     getChapterLink: async () => {
-        log.debug('Retrieving chapter image link')
-
-        try {
-            await driver.page.waitForSelector('#page img, .reader-img, img.img-fluid', { timeout: 5000 })
-            const img = await driver.page.$('#page img') || await driver.page.$('.reader-img') || await driver.page.$('img.img-fluid')
-            if (!img) {
-                throw new Error('No chapter image element found')
-            }
-            const src = await img.getAttribute('src') || await img.getAttribute('data-src') || ''
-            if (!src) {
-                throw new Error('Image element found but src/data-src empty')
-            }
-            log.debug('Found chapter image', { src })
-            return src
-        } catch (error) {
-            log.error('Failed to get chapter image link', error)
-            throw error
-        }
+        return driver.page.url()
     },
 
     ENDPOINT_URL,

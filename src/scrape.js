@@ -11,8 +11,6 @@ async function scrapeChapter(driver, chapterUrl, chapterIndex, pathParser, optio
         const firstImgSrc = await driver.getChapterLink()
         
         let page = Url.fromString(firstImgSrc)
-        page.editRoute(2, { type: "counter" })
-        page.editRoute(3, { type: "counter" })
         
         const pages = []
         let pageNum = 1
@@ -60,7 +58,7 @@ export async function defaultScrape(driver, options = {}) {
     
     const pathParser = parseOutputOptions(options)
     const chapLinks = await driver.getAllChapterLinks()
-    console.log('here')
+
     log.debug('Retrieved chapter links', { count: chapLinks.length })
     
     const out = []
