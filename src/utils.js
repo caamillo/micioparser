@@ -167,3 +167,40 @@ export class Url {
         console.log(this)
     }
 }
+
+export class Proxy {
+    constructor() {
+        this.server = undefined
+        this.user = undefined
+        this.pass = undefined
+    }
+
+    isValid() {
+        return !!this.server
+    }
+}
+
+export class ProxyPool {
+    constructor() {
+        this.pool = []
+        this.idx = 0
+    }
+
+    getProxy() {
+        if (!this.pool.length) return
+
+        const proxy = this.pool[this.idx]
+        this.idx = this.idx + 1 % this.pool.length
+        return proxy
+    }
+
+    addProxy(server, user="", pass="") {
+        this.pool.push(Proxy(server, user, pass))
+    }
+
+    addProxies(proxies) {
+        proxies.map(([ server, user, pass ]) =>
+            this.pool.push(Proxy(server, user, pass))
+        )
+    }
+}

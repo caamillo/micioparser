@@ -1,12 +1,15 @@
-import { build, buildMany } from "./driver.js";
+import { ScrapingExecution } from "./scrape.js";
 
 ;(async () => {
-    const { browser, drivers } = await buildMany("mangaworld")
-    const [ driver ] = drivers
+    let execution = await new ScrapingExecution({ outputPath: 'downloads/vol-$vol/chap-$chap/page-$page.$ext' })
+        .withDrivers([
+            ...(new Array(3).fill([ 'mangaworld', 'chromium' ]))
+        ])
 
-    const results = await driver.search("GTO")
+    const results = await execution.lock(async (driver) => await driver.search("GTO"))
     const gto = results[0]
-    
-    await driver.scrapeBook(drivers, gto, 'default', 'single', { outputPath: 'downloads/vol-$vol/chap-$chap/page-$page.$ext' })
-    await driver.page.screenshot({ path: 'out.png', fullPage: true })
+
+    execution.addOption({ startUrl: gto.link })
+
+    await execution.process()
 })()

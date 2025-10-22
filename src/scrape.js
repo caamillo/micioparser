@@ -1,6 +1,7 @@
-import { Url } from "./utils.js"
+import { Url, ProxyPool } from "./utils.js"
 import log from "./log.js"
 import { parseOutputOptions } from "./path.js"
+import { DriverPool } from "./driver.js"
 
 async function scrapeChapter(driver, chapterUrl, chapterIndex, pathParser, options = {}) {
     log.chapterStart(chapterIndex, chapterUrl.render())
@@ -308,48 +309,55 @@ function makeItemRunner(coreFn) {
     }
 }
 
-async function normalizeResult(coreFn, rawResult, startUrl, mode) {
-    const method = coreFn.name || 'unknown'
+async function normalizeResult(coreFn, rawResult, startAt, mode) {
+    const method = coreFn.name
     
     if (Array.isArray(rawResult)) {
         return rawResult.map(r => ({
             method,
             mode,
-            startUrl: r.chapterUrl || startUrl || null,
+            chapterUrl: r.chapterUrl,
             result: r,
-            error: r.error || null
+            error: r.error,
+            delta_t: Date.now() - startAt
         }))
     }
     
     return [{
         method,
         mode,
-        startUrl: startUrl || null,
         result: rawResult
     }]
 }
 
-export async function processSingle(coreFn, driver, options = {}) {
+export async function processSingle(coreFn, exec) {
     log.info('Starting single processing', { method: coreFn.name })
-    driver = Array.isArray(driver) ? driver[0] : driver
-    
-    await driver.go(options?.startUrl)
-    const raw = await coreFn(driver, options)
-    const result = await normalizeResult(coreFn, raw, options.startUrl || null, 'single')
-    
-    log.success('Single processing complete', { method: coreFn.name })
-    return result
+    let results
+    exec.lock(async (driver) => {
+        await driver.go(exec.opt.startUrl)
+        const raw = await coreFn(driver, exec.opt)
+        results = await normalizeResult(coreFn, raw, exec.startAt, 'single')
+        
+        log.success('Single processing complete', { method: coreFn.name })
+    })
+    return results
 }
 
-export async function processParallel(coreFn, drivers, concurrency = 3, options = {}) {
+export async function processParallel(coreFn, exec) {
+    const options = exec.opt
+    const drivers = exec.drivers
+    const { concurrency } = options
+
     log.info('Starting parallel processing', { 
         method: coreFn.name,
-        concurrency,
-        driverCount: drivers.length 
+        driverCount: drivers.length(),
+        ...options
     })
     
-    await drivers[0].go(options?.startUrl)
-    const chapLinks = await drivers[0].getAllChapterLinks()
+    await exec.lock(async (driver) => {
+        await driver.go(options?.startUrl)
+        await driver.getAllChapterLinks()
+    })
     
     log.debug('Retrieved chapters for parallel processing', { 
         totalChapters: chapLinks.length,
@@ -372,12 +380,11 @@ export async function processParallel(coreFn, drivers, concurrency = 3, options 
             chunkSize: chunk.length 
         })
         
-        const promises = chunk.map((chapLink, idx) => {
-            const driverIndex = idx % drivers.length
+        const promises = chunk.map(async (chapLink, idx) => {
             const chapterIndex = chunkIndex * concurrency + idx + 1
             
-            return runner(drivers[driverIndex], chapLink, chapterIndex, options)
-                .then(raw => normalizeResult(coreFn, raw, chapLink.render(), 'parallel'))
+            return runner(drivers.getDriver(), chapLink, chapterIndex, options)
+                .then(raw => normalizeResult(coreFn, raw, exec.startAt, 'parallel'))
                 .catch(err => {
                     log.error('Parallel item failed', err, { 
                         chapterIndex,
@@ -386,7 +393,6 @@ export async function processParallel(coreFn, drivers, concurrency = 3, options 
                     return [{
                         method: coreFn.name || 'unknown',
                         mode: 'parallel',
-                        startUrl: chapLink.render(),
                         result: null,
                         error: err.message
                     }]
@@ -404,7 +410,11 @@ export async function processParallel(coreFn, drivers, concurrency = 3, options 
     return allResults
 }
 
-export async function processBatch(coreFn, driver, batchSize = 5, options = {}) {
+export async function processBatch(coreFn, exec) {
+    const driver = exec.drivers.getDriver()
+    const options = exec.opt
+    const { batchSize } = options
+
     log.info('Starting batch processing', { 
         method: coreFn.name,
         batchSize 
@@ -434,7 +444,7 @@ export async function processBatch(coreFn, driver, batchSize = 5, options = {}) 
             
             try {
                 const raw = await makeItemRunner(coreFn)(driver, chapLink, chapterIndex, options)
-                const norm = await normalizeResult(coreFn, raw, chapLink.render(), 'batch')
+                const norm = await normalizeResult(coreFn, raw, exec.startAt, 'batch')
                 norm.forEach(n => allResults.push(n))
             } catch (err) {
                 log.error('Batch item failed', err, { 
@@ -444,7 +454,6 @@ export async function processBatch(coreFn, driver, batchSize = 5, options = {}) 
                 allResults.push({
                     method: coreFn.name || 'unknown',
                     mode: 'batch',
-                    startUrl: chapLink.render(),
                     result: null,
                     error: err.message
                 })
@@ -459,15 +468,76 @@ export async function processBatch(coreFn, driver, batchSize = 5, options = {}) 
     return allResults
 }
 
-export const scrapeMethods = {
-    default: {
-        single: (driver, options) => processSingle(defaultScrape, driver, options),
-        parallel: (drivers, concurrency, options) => processParallel(defaultScrape, drivers, concurrency, options),
-        batch: (driver, batchSize, options) => processBatch(defaultScrape, driver, batchSize, options)
-    },
-    bruteforce: {
-        single: (driver, options) => processSingle(bruteScrape, driver, options),
-        parallel: (drivers, concurrency, options) => processParallel(bruteScrape, drivers, concurrency, options),
-        batch: (driver, batchSize, options) => processBatch(bruteScrape, driver, batchSize, options)
+const Methods = {
+    default: defaultScrape,
+    bruteforce: bruteScrape
+}
+
+const Modes = {
+    single: processSingle,
+    parallel: processParallel,
+    batch: processBatch
+}
+
+export class ScrapingExecution {
+    constructor(opt={}) {
+        opt = {
+            proxy: new ProxyPool(),
+            context_usage: 'multi-context',
+            ...opt
+        }
+
+        this.drivers = new DriverPool(opt)
+        this.opt = opt
+        this.startAt = null
+    }
+
+    isValid() {
+        return this.drivers.isValid()
+    }
+
+    copy() {
+        return Object.create(
+            Object.getPrototypeOf(this),
+            Object.getOwnPropertyDescriptors(this)
+        )
+    }
+
+    async lock(fn) {
+        if (!this.isValid()) return
+
+        return await this.drivers.exec(fn)
+    }
+
+    async process(method="default", mode="single") {
+        try {
+            method = Methods?.[method]
+            if (!method) throw new Error('Invalid method.')
+            
+            mode = Modes?.[mode]
+            if (!mode) throw new Error('Invalid mode.')
+
+            this.startAt = Date.now()
+            await mode?.(method, this)
+        } catch (err) {
+            log.error('Error processing', err)
+        }
+    }
+
+    async withDrivers(drivers) {
+        const pool = new DriverPool()
+        await Promise.all(drivers.map(async driver => await pool.addDriver(...driver, this.opt)))
+        this.drivers = pool
+        return this
+    }
+
+    static withOptions(opt={}) {
+        const self = this.copy()
+        self.opt = { ...self.opt, ...opt }
+        return self
+    }
+
+    addOption(opt={}) {
+        this.opt = { ...this.opt, ...opt }
     }
 }
