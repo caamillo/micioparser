@@ -200,7 +200,8 @@ export class DriverPool {
         if (!this.pool.length) return
 
         const driver = this.pool[this.idx]
-        this.idx = this.idx + 1 % this.pool.length
+        console.log(driver, this.idx)
+        this.idx = (this.idx + 1) % this.pool.length
         return driver
     }
     
@@ -227,7 +228,7 @@ export class DriverPool {
             if (!this.isValid()) throw new Error("DriverPool is not valid.")
 
             const driver = this.getDriver()
-            if (!driver.isValid()) throw new Error([ "Driver is not valid", driver ])
+            if (!driver || !driver.isValid()) throw new Error([ "Driver is not valid", driver ])
     
             const result = await driver.exec(fn)
             return result

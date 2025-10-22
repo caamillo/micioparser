@@ -334,7 +334,7 @@ export async function processSingle(coreFn, exec, opt = {}) {
 
     log.info('Starting single processing', { method: coreFn.name })
     let results
-    exec.lock(async (driver) => {
+    await exec.lock(async (driver) => {
         await driver.go(options.startUrl)
         const raw = await coreFn(driver, options)
         results = await normalizeResult(coreFn, raw, exec.startAt, 'single')
@@ -354,10 +354,12 @@ export async function processParallel(coreFn, exec, opt = {}) {
         driverCount: drivers.length(),
         ...options
     })
+
+    let chapLinks
     
     await exec.lock(async (driver) => {
         await driver.go(options?.startUrl)
-        await driver.getAllChapterLinks()
+        chapLinks = await driver.getAllChapterLinks()
     })
     
     log.debug('Retrieved chapters for parallel processing', { 
@@ -383,21 +385,27 @@ export async function processParallel(coreFn, exec, opt = {}) {
         
         const promises = chunk.map(async (chapLink, idx) => {
             const chapterIndex = chunkIndex * concurrency + idx + 1
-            
-            return runner(drivers.getDriver(), chapLink, chapterIndex, options)
-                .then(raw => normalizeResult(coreFn, raw, exec.startAt, 'parallel'))
-                .catch(err => {
-                    log.error('Parallel item failed', err, { 
-                        chapterIndex,
-                        url: chapLink.render() 
-                    })
-                    return [{
-                        method: coreFn.name || 'unknown',
-                        mode: 'parallel',
-                        result: null,
-                        error: err.message
-                    }]
+            let result
+
+            try {
+                await exec.lock(async (driver) => {
+                    result = await runner(driver, chapLink, chapterIndex, options)
                 })
+            } catch (err) {
+                log.error('Parallel item failed', err, { 
+                    chapterIndex,
+                    url: chapLink.render() 
+                })
+                
+                return [{
+                    method: coreFn.name,
+                    mode: 'parallel',
+                    result: null,
+                    error: err.message
+                }]
+            }
+
+            return normalizeResult(coreFn, result, exec.startAt, 'parallel')
         })
         
         const chunkResults = await Promise.all(promises)
@@ -480,11 +488,70 @@ const Modes = {
     batch: processBatch
 }
 
+class RateLimiter {
+    constructor(reqsPerSecond = Infinity) {
+        this.reqsPerSecond = reqsPerSecond
+        this.intervalMs = reqsPerSecond === Infinity ? 0 : 1000 / reqsPerSecond
+        this.lastRequestTime = 0
+        this.queue = []
+        this.processing = false
+        
+        log.info('Rate limiter initialized', { 
+            reqsPerSecond: reqsPerSecond === Infinity ? 'unlimited' : reqsPerSecond,
+            intervalMs: this.intervalMs 
+        })
+    }
+
+    async throttle() {
+        if (this.reqsPerSecond === Infinity) return
+
+        return new Promise((resolve) => {
+            this.queue.push(resolve)
+            this._processQueue()
+        })
+    }
+
+    async _processQueue() {
+        if (this.processing || this.queue.length === 0) return
+        
+        this.processing = true
+        const now = Date.now()
+        const timeSinceLastRequest = now - this.lastRequestTime
+        const waitTime = Math.max(0, this.intervalMs - timeSinceLastRequest)
+        
+        if (waitTime > 0) {
+            log.debug('Rate limit throttling', { waitMs: waitTime })
+            await new Promise(resolve => setTimeout(resolve, waitTime))
+        }
+        
+        this.lastRequestTime = Date.now()
+        const resolve = this.queue.shift()
+        this.processing = false
+        
+        resolve()
+        
+        if (this.queue.length > 0) {
+            this._processQueue()
+        }
+    }
+
+    getStats() {
+        return {
+            reqsPerSecond: this.reqsPerSecond,
+            intervalMs: this.intervalMs,
+            queueLength: this.queue.length,
+            lastRequestTime: this.lastRequestTime
+        }
+    }
+}
+
 export class ScrapingExecution {
     constructor(opt={}) {
         opt = {
             proxy: new ProxyPool(),
             context_usage: 'multi-context',
+            concurrency: 3,
+            rateLimit: Infinity,
             global_search_keys: [
                 'link', 'banner', 'title',
                 'type', 'author', 'artist',
@@ -496,6 +563,7 @@ export class ScrapingExecution {
         this.drivers = new DriverPool(opt)
         this.opt = opt
         this.startAt = null
+        this.rateLimiter = new RateLimiter(opt.rateLimit)
     }
 
     isValid() {
@@ -512,7 +580,18 @@ export class ScrapingExecution {
     async lock(fn) {
         if (!this.isValid()) return
 
-        return await this.drivers.exec(fn)
+        await this.rateLimiter.throttle()
+        
+        const startTime = Date.now()
+        const result = await this.drivers.exec(fn)
+        const duration = Date.now() - startTime
+        
+        log.debug('Request completed', { 
+            durationMs: duration,
+            rateLimitStats: this.rateLimiter.getStats()
+        })
+        
+        return result
     }
 
     async process(method="default", mode="single", opt={}) {
@@ -524,9 +603,20 @@ export class ScrapingExecution {
             if (!mode) throw new Error('Invalid mode.')
 
             this.startAt = Date.now()
-            await mode?.(method, this, opt)
+            const results = await mode?.(method, this, opt)
+            
+            const totalTime = Date.now() - this.startAt
+            log.success('Processing complete', {
+                method: method.name,
+                mode: mode.name,
+                totalTimeMs: totalTime,
+                rateLimitStats: this.rateLimiter.getStats()
+            })
+            
+            return results
         } catch (err) {
             log.error('Error processing', err)
+            throw err
         }
     }
 
@@ -540,10 +630,30 @@ export class ScrapingExecution {
     static withOptions(opt={}) {
         const self = this.copy()
         self.opt = { ...self.opt, ...opt }
+        self.rateLimiter = new RateLimiter(self.opt.rateLimit)
         return self
     }
 
     addOption(opt={}) {
         this.opt = { ...this.opt, ...opt }
+        
+        if ('rateLimit' in opt) {
+            this.rateLimiter = new RateLimiter(opt.rateLimit)
+            log.info('Rate limiter updated', { 
+                newRateLimit: opt.rateLimit 
+            })
+        }
+    }
+
+    setRateLimit(reqsPerPeriod, periodSeconds = 1) {
+        const reqsPerSecond = reqsPerPeriod / periodSeconds
+        this.opt.rateLimit = reqsPerSecond
+        this.rateLimiter = new RateLimiter(reqsPerSecond)
+        
+        log.info('Rate limit configured', { 
+            reqsPerPeriod,
+            periodSeconds,
+            effectiveReqsPerSecond: reqsPerSecond
+        })
     }
 }
