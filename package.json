@@ -1,8 +1,11 @@
 {
   "name": "manga",
   "version": "1.0.0",
-  "main": "index.js",
-  "scripts": {},
+  "type": "module",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",

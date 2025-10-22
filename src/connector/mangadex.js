@@ -8,82 +8,45 @@ export default (driver) => ({
     ...driver,
     name: 'mangadex',
 
-    search: async (title) => {
-        log.info('Starting manga search', { title, source: 'mangadex' })
-
-        let url = new Url(ENDPOINT_URL, ['titles'], '', {
-            q: title
-        })
-
-        await driver.page.goto(url.render())
-        log.debug('Navigated to search page', { url: url.render() })
-
-        const anchorsText = await childrenText(driver.page, '.flex.justify-center.flex-wrap.gap-2.mt-6 > a') || []
-        let pages = 1
+    getPages: async() => {
+        const anchorsText = await childrenText(driver.page, '.flex.justify-center.flex-wrap.gap-2.mt-6 > a')
         if (anchorsText.length >= 2) {
             const maybe = anchorsText[anchorsText.length - 2]
             const parsed = parseInt(maybe)
-            pages = Number.isFinite(parsed) && parsed > 0 ? parsed : 1
+            return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+        }
+        return
+    },
+
+    getSearchResults: async() => {
+        const entries = await driver.page.$$('.grid.gap-2.two-col > div')
+        if (entries.length) return entries
+        return
+    },
+
+    getSearchEntry: async(key, entry) => {
+        const keys = {
+            link: async () => {
+                const link = await childAttribute(entry, 'a.title', 'href')
+                return link.startsWith('http') ? link : (ENDPOINT_URL + link)
+            },
+            banner: async () => await childAttribute(entry, 'img.rounded.shadow-md.w-full.h-auto', 'src'),
+            title: async () => await childText(entry, 'a.title'),
+            genres: async () => await childrenText(entry, '.flex.flex-wrap.gap-1.tags-row.tags.self-start > *'),
+            short_plot: async () => await childText(entry, '.md-md-container.dense')
         }
 
-        log.info('Found search result pages', { totalPages: pages, title })
+        const getEntry = keys?.[key]
+        if (!getEntry) return
 
-        const results = []
+        return await getEntry()
+    },
 
-        for (let i = 0; i < pages; i++) {
-            url = new Url(ENDPOINT_URL, ['titles'], '', {
-                q: title,
-                page: i + 1
-            })
-
-            log.debug('Fetching search page', { page: i + 1, totalPages: pages, url: url.render() })
-            await driver.page.goto(url.render())
-
-            const entries = await driver.page.$$('.grid.gap-2.two-col > div') || []
-            log.debug('Found entries on page', { page: i + 1, entriesCount: entries.length })
-
-            const pageResults = await Promise.all(
-                entries.map(async entry => {
-                    try {
-                        const href = await childAttribute(entry, 'a.title', 'href') || ''
-                        const absolute = href.startsWith('http') ? href : (ENDPOINT_URL + href)
-                        const banner = await childAttribute(entry, 'img.rounded.shadow-md.w-full.h-auto', 'src') || ''
-                        const titleText = await childText(entry, 'a.title') || ''
-                        const genres = await childrenText(entry, '.flex.flex-wrap.gap-1.tags-row.tags.self-start > *') || []
-                        const shortPlot = await childText(entry, '.md-md-container.dense') || ''
-
-                        return {
-                            link: absolute,
-                            banner,
-                            title: titleText,
-                            genres,
-                            short_plot: shortPlot
-                        }
-                    } catch (error) {
-                        log.error('Failed to parse entry', error, { page: i + 1 })
-                        return null
-                    }
-                })
-            )
-
-            const validResults = pageResults.filter(r => r !== null)
-            results.push(...validResults)
-
-            log.success('Processed search page', {
-                page: i + 1,
-                totalPages: pages,
-                resultsOnPage: validResults.length,
-                totalResults: results.length
-            })
-        }
-
-        log.success('Search completed', {
-            title,
-            totalResults: results.length,
-            totalPages: pages
+    getSearchUrl(title) {
+        return new Url(ENDPOINT_URL, ['titles'], '', {
+            q: title,
+            page: 1
         })
-
-        return results
     },
 
     getAllChapterLinks: async (opts = {}) => {
@@ -112,15 +75,16 @@ export default (driver) => ({
 
             for (const vol of volumeLis) {
                 const chapLis = await vol.$$('ul > li') || []
+                const volBtn = await vol.$('button')
+                if (!volBtn) continue
+                await volBtn.click()
+
                 for (const chap of chapLis) {
-                    try {
-                        const hasButton = await chap.$('button') || await chap.$('span')
-                        console.log(hasButton)
-                        if (hasButton) {
-                            await hasButton.click().catch(() => {})
-                            await driver.page.waitForTimeout(80)
-                        }
-                    } catch (e) {}
+                    const chapBtn = await chap.$('button')
+                    if (!chapBtn) continue
+                    
+                    await chapBtn.click()
+                    console.log('miao')
 
                     const langLis = await chap.$$('ul > li') || []
                     if (langLis.length === 0) continue

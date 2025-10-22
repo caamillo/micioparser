@@ -7,78 +7,50 @@ const CDN_ENDPOINT_URL = 'https://cdn.mangaworld.cx'
 export default (driver) => ({
     ...driver,
     name: 'mangaworld',
-   
-    search: async (title) => {
-        log.info('Starting manga search', { title, source: 'mangaworld' })
-        
-        let url = new Url(ENDPOINT_URL, ["archive"], "", {
-            "keyword": title,
-            "page": 1
-        })
-        
-        await driver.page.goto(url.render())
-        log.debug('Navigated to search page', { url: url.render() })
-        
-        const pages = parseInt(await (await driver.page.$('.page-item.last > a.page-link')).textContent())
-        log.info('Found search result pages', { totalPages: pages, title })
-        
-        const results = []
-        
-        for (let i = 0; i < pages; i++) {
-            url = new Url(ENDPOINT_URL, ["archive"], "", {
-                "keyword": title,
-                "page": i + 1
-            })
-            
-            log.debug('Fetching search page', { page: i + 1, totalPages: pages, url: url.render() })
-            await driver.page.goto(url.render())
-            
-            const entries = await driver.page.$$('.comics-grid > .entry')
-            log.debug('Found entries on page', { page: i + 1, entriesCount: entries.length })
-            
-            const pageResults = await Promise.all(
-                entries.map(async entry => {
-                    try {
-                        return {
-                            link: await childAttribute(entry, 'a.thumb', 'href'),
-                            banner: await childAttribute(entry, 'a.thumb > img', 'src'),
-                            title: await childText(entry, '.manga-title'),
-                            type: await childText(entry, '.genre > a'),
-                            author: await childText(entry, '.author > a'),
-                            artist: await childText(entry, '.artist > a'),
-                            genres: await childrenText(entry, '.genres > a'),
-                            short_plot: await entry.$eval('.story', el => {
-                                const clone = el.cloneNode(true)
-                                clone.querySelector('span').remove()
-                                return clone.textContent.trim()
-                            })
-                        }
-                    } catch (error) {
-                        log.error('Failed to parse entry', error, { page: i + 1 })
-                        return null
-                    }
-                })
-            )
-            
-            // Filter out any null results from failed parsing
-            const validResults = pageResults.filter(r => r !== null)
-            results.push(...validResults)
-            
-            log.success('Processed search page', { 
-                page: i + 1, 
-                totalPages: pages,
-                resultsOnPage: validResults.length,
-                totalResults: results.length 
+
+    getPages: async() => {
+        let pages = await driver.page.$('.page-item.last > a.page-link')
+        if (!pages) return
+
+        pages = await pages.textContent()
+        if (!pages.length) return
+
+        if (!isNaN(pages)) return parseInt(pages)
+        return
+    },
+
+    getSearchResults: async() => {
+        const entries = await driver.page.$$('.comics-grid > .entry')
+        return entries
+    },
+
+    getSearchEntry: async(key, entry) => {
+        const keys = {
+            link: async () => await childAttribute(entry, 'a.thumb', 'href'),
+            banner: async () => await childAttribute(entry, 'a.thumb > img', 'src'),
+            title: async () => await childText(entry, '.manga-title'),
+            type: async () => await childText(entry, '.genre > a'),
+            author: async () => await childText(entry, '.author > a'),
+            artist: async () => await childText(entry, '.artist > a'),
+            genres: async () => await childrenText(entry, '.genres > a'),
+            short_plot: async () => await entry.$eval('.story', el => {
+                const clone = el.cloneNode(true)
+                clone.querySelector('span').remove()
+                return clone.textContent.trim()
             })
         }
-       
-        log.success('Search completed', { 
-            title, 
-            totalResults: results.length,
-            totalPages: pages 
+
+        const getEntry = keys?.[key]
+        if (!getEntry) return
+
+        return await getEntry()
+    },
+
+    getSearchUrl(title) {
+        return new Url(ENDPOINT_URL, ["archive"], "", {
+            keyword: title,
+            page: 1
         })
-        
-        return results
     },
     
     getAllChapterLinks: async () => {

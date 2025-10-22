@@ -143,6 +143,12 @@ export class Url {
     AddArgs(args) {
         this.args = { ...this.args, ...args }
     }
+    incArg(key) {
+        let value = this.args?.[key]
+        if (isNaN(value)) return
+
+        this.args[key] = parseInt(value) + 1
+    }
     render() {
         let url = this.domain
         

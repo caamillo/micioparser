@@ -9,5 +9,7 @@ node_modules/
 
 
 src/out.png
+out.png
 .env
 src/download
+downloads/

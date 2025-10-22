@@ -102,41 +102,82 @@ class Driver {
         
         const api = {
             page,
+            opt: this.opt,
 
             goHome: async () =>
                 await page.goto(this.conn().ENDPOINT_URL),
+
             go: async (book) =>
                 await page.goto(typeof book === 'object' ? book?.link : book),
-            scrapeBook: async (drivers, book, method = 'default', mode = 'single', options = {}) => {
-                if (!Array.isArray(drivers)) drivers = [ drivers ]
-
-                const scrapeMethod = drivers?.[0]?.scrape?.[method]?.[mode]
-                if (!scrapeMethod) {
-                    throw new Error(`Scrape method ${method}.${mode} not found`)
-                }
-                
-                const mergedOptions = { ...options, startUrl: book.link }
-                const n_drivers = drivers.length > 1 ? drivers : drivers[0]
-                
-                switch (mode) {
-                    case 'single':
-                        return await scrapeMethod(n_drivers, mergedOptions)
-                    
-                    case 'parallel':
-                        const concurrency = options.concurrency || 3
-                        return await scrapeMethod(n_drivers, concurrency, mergedOptions)
-                    
-                    case 'batch':
-                        const batchSize = options.batchSize || 5
-                        return await scrapeMethod(n_drivers, batchSize, mergedOptions)
-                    
-                    default:
-                        throw new Error(`Unknown mode: ${mode}`)
-                }
-            }
         }
-        const apiConn = this.conn(api)
-        return { ...api, ...apiConn }
+
+        const driver = this.conn(api)
+
+        return {
+            ...api,
+            ...driver,
+            
+            search: async (title) => {
+                log.info('Starting manga search', { title, source: driver.name, browser: this.selectedBrowser.deviceDisplayName })
+                
+                let url = driver.getSearchUrl(title)
+                await driver.page.goto(url.render())
+                await driver.page.screenshot({
+                    path: 'out.png',
+                    fullPage: true
+                })
+
+                log.debug('Navigated to search page', { url: url.render() })
+                
+                const pages = (await driver.getPages()) ?? 1
+                log.info('Found search result pages', { totalPages: pages, title })
+                
+                const results = []
+                
+                for (let i = 0; i < pages; i++) {
+                    log.debug('Fetching search page', { page: i + 1, totalPages: pages, url: url.render() })
+                    
+                    const entries = await driver.getSearchResults()
+                    log.debug('Found entries on page', { page: i + 1, entriesCount: entries.length })
+                    
+                    const pageResults = await Promise.all(
+                        entries.map(async entry => {
+                            try {
+                                const entryData = {}
+                                for (const key of driver.opt.global_search_keys) {
+                                    entryData[key] = await driver.getSearchEntry(key, entry)
+                                }
+                                return entryData
+                            } catch (error) {
+                                log.error('Failed to parse entry', error, { page: i + 1 })
+                                return null
+                            }
+                        })
+                    )
+                    
+                    const validResults = pageResults.filter(r => r !== null)
+                    results.push(...validResults)
+                    
+                    log.success('Processed search page', { 
+                        page: i + 1, 
+                        totalPages: pages,
+                        resultsOnPage: validResults.length,
+                        totalResults: results.length 
+                    })
+
+                    url.incArg('page')
+                    await driver.page.goto(url.render())
+                }
+                
+                log.success('Search completed', { 
+                    title, 
+                    totalResults: results.length,
+                    totalPages: pages 
+                })
+                
+                return results
+            },
+        }
     }
 }
 

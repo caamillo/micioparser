@@ -60,6 +60,7 @@ export async function defaultScrape(driver, options = {}) {
     
     const pathParser = parseOutputOptions(options)
     const chapLinks = await driver.getAllChapterLinks()
+    console.log('here')
     log.debug('Retrieved chapter links', { count: chapLinks.length })
     
     const out = []
@@ -330,12 +331,14 @@ async function normalizeResult(coreFn, rawResult, startAt, mode) {
     }]
 }
 
-export async function processSingle(coreFn, exec) {
+export async function processSingle(coreFn, exec, opt = {}) {
+    const options = { ...exec.opt, ...opt }
+
     log.info('Starting single processing', { method: coreFn.name })
     let results
     exec.lock(async (driver) => {
-        await driver.go(exec.opt.startUrl)
-        const raw = await coreFn(driver, exec.opt)
+        await driver.go(options.startUrl)
+        const raw = await coreFn(driver, options)
         results = await normalizeResult(coreFn, raw, exec.startAt, 'single')
         
         log.success('Single processing complete', { method: coreFn.name })
@@ -343,8 +346,8 @@ export async function processSingle(coreFn, exec) {
     return results
 }
 
-export async function processParallel(coreFn, exec) {
-    const options = exec.opt
+export async function processParallel(coreFn, exec, opt = {}) {
+    const options = { ...exec.opt, ...opt }
     const drivers = exec.drivers
     const { concurrency } = options
 
@@ -410,9 +413,9 @@ export async function processParallel(coreFn, exec) {
     return allResults
 }
 
-export async function processBatch(coreFn, exec) {
+export async function processBatch(coreFn, exec, opt = {}) {
     const driver = exec.drivers.getDriver()
-    const options = exec.opt
+    const options = { ...exec.opt, ...opt }
     const { batchSize } = options
 
     log.info('Starting batch processing', { 
@@ -484,6 +487,11 @@ export class ScrapingExecution {
         opt = {
             proxy: new ProxyPool(),
             context_usage: 'multi-context',
+            global_search_keys: [
+                'link', 'banner', 'title',
+                'type', 'author', 'artist',
+                'genres', 'short_plot'
+            ],
             ...opt
         }
 
@@ -509,7 +517,7 @@ export class ScrapingExecution {
         return await this.drivers.exec(fn)
     }
 
-    async process(method="default", mode="single") {
+    async process(method="default", mode="single", opt={}) {
         try {
             method = Methods?.[method]
             if (!method) throw new Error('Invalid method.')
@@ -518,7 +526,7 @@ export class ScrapingExecution {
             if (!mode) throw new Error('Invalid mode.')
 
             this.startAt = Date.now()
-            await mode?.(method, this)
+            await mode?.(method, this, opt)
         } catch (err) {
             log.error('Error processing', err)
         }
