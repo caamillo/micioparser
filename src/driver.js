@@ -66,11 +66,25 @@ class Driver {
     async build() {
         try {
             if (!this.isValid()) throw new Error("Driver is not valid.")
-    
-            const browser = await this.selectedBrowser.driver.launch()
-            const ctx = await browser.newContext({ ...devices[this.selectedBrowser.deviceDisplayName], proxy: this.opt.proxy.getProxy() })
 
-            this.context = { ctx, pages: [ await ctx.newPage() ], idx: 0, }
+            if (this.context?.ctx) {
+                await this.context.ctx.close()
+            }
+
+            if (this.browser && this.opt.context_usage === 'multi-context') {
+                await this.browser.close()
+            }
+
+            if (!this.browser || this.opt.context_usage === 'multi-context') {
+                this.browser = await this.selectedBrowser.driver.launch()
+            }
+
+            const ctx = await this.browser.newContext({ 
+                ...devices[this.selectedBrowser.deviceDisplayName], 
+                proxy: this.opt.proxy.getProxy() 
+            })
+
+            this.context = { ctx, pages: [ await ctx.newPage() ], idx: 0 }
 
         } catch (err) {
             log.error('Build error', err)
@@ -87,28 +101,45 @@ class Driver {
                     break
                 case 'multi-context':
                     await this.build()
+                    break
             }
 
             return result
         } catch (err) {
             log.error('Execute error', err)
+            throw err
+        }
+    }
+
+    async close() {
+        if (this.context?.ctx) {
+            await this.context.ctx.close()
+        }
+        if (this.browser) {
+            await this.browser.close()
         }
     }
 
     getDriverApis() {
-        if (!this.isValid() && this.context) return
+        if (!this.isValid() || !this.context) return
 
-        const page = this.context.pages[this.context.idx]
+        const self = this
         
         const api = {
-            page,
+            get page() {
+                return self.context.pages[self.context.idx]
+            },
             opt: this.opt,
 
-            goHome: async () =>
-                await page.goto(this.conn().ENDPOINT_URL),
+            goHome: async () => {
+                const currentPage = self.context.pages[self.context.idx]
+                await currentPage.goto(self.conn().ENDPOINT_URL)
+            },
 
-            go: async (book) =>
-                await page.goto(typeof book === 'object' ? book?.link : book),
+            go: async (book) => {
+                const currentPage = self.context.pages[self.context.idx]
+                await currentPage.goto(typeof book === 'object' ? book?.link : book)
+            },
         }
 
         const driver = this.conn(api)
@@ -118,10 +149,17 @@ class Driver {
             ...driver,
             
             search: async (title) => {
-                log.info('Starting manga search', { title, source: driver.name, browser: this.selectedBrowser.deviceDisplayName })
+                log.info('Starting manga search', { title, source: driver.name, browser: self.selectedBrowser.deviceDisplayName })
                 
                 let url = driver.getSearchUrl(title)
-                await driver.page.goto(url.render())
+                await driver.page.goto(url.render(), { 
+                    waitUntil: 'networkidle',
+                    timeout: 30000 
+                })
+                
+                // Wait for content to load
+                await driver.page.waitForTimeout(2000)
+                
                 await driver.page.screenshot({
                     path: 'out.png',
                     fullPage: true
@@ -135,10 +173,16 @@ class Driver {
                 const results = []
                 
                 for (let i = 0; i < pages; i++) {
-                    log.debug('Fetching search page', { page: i + 1, totalPages: pages, url: url.render() })
+                    log.debug('Fetching search page', { page: i, totalPages: pages, url: url.render() })
                     
                     const entries = await driver.getSearchResults()
-                    log.debug('Found entries on page', { page: i + 1, entriesCount: entries.length })
+                    
+                    if (!entries || !entries.length) {
+                        log.warn('No entries found on page', { page: i })
+                        continue
+                    }
+                    
+                    log.debug('Found entries on page', { page: i, entriesCount: entries.length })
                     
                     const pageResults = await Promise.all(
                         entries.map(async entry => {
@@ -200,7 +244,6 @@ export class DriverPool {
         if (!this.pool.length) return
 
         const driver = this.pool[this.idx]
-        console.log(driver, this.idx)
         this.idx = (this.idx + 1) % this.pool.length
         return driver
     }
@@ -234,6 +277,7 @@ export class DriverPool {
             return result
         } catch (err) {
             log.error('Execute error', err)
+            throw err
         }
     }
 }

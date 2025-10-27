@@ -11,10 +11,8 @@ export default (driver) => ({
     getPages: async() => {
         let pages = await driver.page.$('.page-item.last > a.page-link')
         if (!pages) return
-
         pages = await pages.textContent()
         if (!pages.length) return
-
         if (!isNaN(pages)) return parseInt(pages)
         return
     },
@@ -39,10 +37,8 @@ export default (driver) => ({
                 return clone.textContent.trim()
             })
         }
-
         const getEntry = keys?.[key]
         if (!getEntry) return
-
         return await getEntry()
     },
 
@@ -52,14 +48,14 @@ export default (driver) => ({
             page: 1
         })
     },
-    
+   
     getAllChapterLinks: async () => {
         log.debug('Retrieving all chapter links')
-        
+       
         try {
             const anchors = await driver.page.$$('.chapters-wrapper a.chap')
             log.debug('Found chapter anchors', { count: anchors.length })
-            
+           
             const links = await Promise.all(
                 anchors.map(async a => {
                     try {
@@ -71,20 +67,20 @@ export default (driver) => ({
                     }
                 })
             )
-            
+           
             const validLinks = links.filter(link => link !== null)
             log.success('Retrieved chapter links', { count: validLinks.length })
-            
-            return validLinks
+           
+            return validLinks.reverse() // ASC (0 -> 9)
         } catch (error) {
             log.error('Failed to get all chapter links', error)
             throw error
         }
     },
-    
+   
     getChapterLink: async () => {
         log.debug('Retrieving chapter image link')
-        
+       
         try {
             const imgSrc = await (await driver.page.$('#page .img-fluid')).getAttribute('src')
             log.debug('Found chapter image', { src: imgSrc })
@@ -92,6 +88,20 @@ export default (driver) => ({
         } catch (error) {
             log.error('Failed to get chapter image link', error)
             throw error
+        }
+    },
+
+    getPageCount: async () => {
+        return null
+    },
+
+    getPage: async () => {
+        try {
+            await driver.page.waitForSelector('img', { timeout: 5000 })
+            return await driver.page.$('img')
+        } catch (error) {
+            log.debug('Image not found', error)
+            return null
         }
     },
    

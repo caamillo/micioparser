@@ -118,22 +118,26 @@ export class Url {
     editRoute(idx, args) {
         this.routes[idx].edit(args)
     }
+    getFileIndex() {
+        const match = this.file.match(/\d+/)
+        if (!match) return
+
+        const n = parseInt(match[0])
+        return n
+    }
     setFile(file) {
         this.file = file
     }
     incFile() {
         if (!this.file) this.resetFile()
 
-        let n = this.file.split('').filter(el => !isNaN(el)).join('')
-        if (!n.length) return
-
-        n = parseInt(n)
-        n += 1
-
-        this.file = '/' + n + this.file.slice(this.file.indexOf('.'))
+        const n = this.getFileIndex() + 1
+        const ext = this.file.includes('.') ? this.file.slice(this.file.lastIndexOf('.')) : '.jpg'
+        this.file = `/${n}${ext}`
     }
     resetFile() {
-        this.file = '/' + 1 + this.file ? this.file.slice(this.file.indexOf('.')) : '.jpg'
+        const ext = this.file && this.file.includes('.') ? this.file.slice(this.file.lastIndexOf('.')) : '.jpg'
+        this.file = `/${1}${ext}`
     }
     AddArgs(args) {
         this.args = { ...this.args, ...args }
@@ -191,7 +195,7 @@ export class ProxyPool {
         if (!this.pool.length) return
 
         const proxy = this.pool[this.idx]
-        this.idx = this.idx + 1 % this.pool.length
+        this.idx = (this.idx + 1) % this.pool.length
         return proxy
     }
 

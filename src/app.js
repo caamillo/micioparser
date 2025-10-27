@@ -1,17 +1,16 @@
-import { ScrapingExecution } from "./scrape.js";
+import { ScrapingExecution } from "./scrape.js"
 
 ;(async () => {
     let execution = await new ScrapingExecution({
         outputPath: 'downloads/vol-$vol/chap-$chap/page-$page.$ext',
-        concurrency: 3,
-        rateLimit: 100 / 60
+        rateLimit: 'auto'
     })
         .withDrivers([
-            ...(new Array(3).fill([ 'mangaworld', 'chromium' ]))
+            ...(new Array(3).fill([ 'mangadex', 'chromium' ]))
         ])
-
+   
     const results = await execution.lock(async (driver) => await driver.search("GTO"))
     const gto = results[0]
-
-    await execution.process('default', 'parallel', { startUrl: gto.link })
+    
+    await execution.process('default', 'single', { startUrl: gto.link })
 })()

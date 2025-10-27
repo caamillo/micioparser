@@ -2,46 +2,129 @@ import { Url, ProxyPool } from "./utils.js"
 import log from "./log.js"
 import { parseOutputOptions } from "./path.js"
 import { DriverPool } from "./driver.js"
+import { RateLimiter, RateLimitTester } from "./rate-limiter.js"
 
 async function scrapeChapter(driver, chapterUrl, chapterIndex, pathParser, options = {}) {
     log.chapterStart(chapterIndex, chapterUrl.render())
     
     try {
-        await driver.page.goto(chapterUrl.render())
-        const firstImgSrc = await driver.getChapterLink()
+        await driver.page.goto(chapterUrl.render(), { 
+            waitUntil: 'networkidle',
+            timeout: 30000 
+        })
         
-        let page = Url.fromString(firstImgSrc)
+        await driver.page.waitForTimeout(1000)
         
         const pages = []
         let pageNum = 1
         
-        while (true) {
-            try {
-                const res = await driver.page.goto(page.render())
-                log.chapterPage(chapterIndex, pageNum, page.render())
-                
-                if (!res.ok()) throw new Error("Page not found")
-                
-                const outputPath = await pathParser.resolveAndEnsure({
-                    chap: chapterIndex,
-                    page: pageNum
-                })
-                
-                await driver.page.screenshot({
-                    path: outputPath,
-                    fullPage: true
-                })
-                
-                pages.push({ url: page.render(), path: outputPath })
-                page.incFile()
-                pageNum++
-            } catch (error) {
-                log.chapterComplete(chapterIndex, pageNum - 1)
-                break
+        const maxPages = typeof driver.getPageCount === 'function' 
+            ? await driver.getPageCount() 
+            : null
+        
+        const hasNavigation = typeof driver.getNextPage === 'function'
+        
+        if (maxPages !== null) {
+            log.debug('Using defined page count', { maxPages, chapter: chapterIndex })
+            
+            for (pageNum = 1; pageNum <= maxPages; pageNum++) {
+                try {
+                    log.chapterPage(chapterIndex, pageNum, driver.page.url())
+                    
+                    const outputPath = await pathParser.resolveAndEnsure({
+                        chap: chapterIndex,
+                        page: pageNum
+                    })
+
+                    const img = await driver.getPage()
+                    if (!img) throw new Error("Page image not found")
+                    
+                    await img.screenshot({ path: outputPath })
+                    pages.push({ url: driver.page.url(), path: outputPath })
+                    
+                    if (pageNum < maxPages && hasNavigation) {
+                        const navigated = await driver.getNextPage()
+                        if (!navigated) {
+                            log.warn('Navigation failed but more pages expected', { 
+                                currentPage: pageNum, 
+                                maxPages 
+                            })
+                            break
+                        }
+                    }
+                } catch (error) {
+                    log.error("Error scraping chapter page", error, { page: pageNum })
+                    break
+                }
+            }
+            
+        } else if (hasNavigation) {
+            log.debug('Using connector navigation method', { chapter: chapterIndex })
+            
+            while (true) {
+                try {
+                    log.chapterPage(chapterIndex, pageNum, driver.page.url())
+                    
+                    const outputPath = await pathParser.resolveAndEnsure({
+                        chap: chapterIndex,
+                        page: pageNum
+                    })
+
+                    const img = await driver.getPage()
+                    if (!img) throw new Error("Page image not found")
+                    
+                    await img.screenshot({ path: outputPath })
+                    pages.push({ url: driver.page.url(), path: outputPath })
+                    
+                    const hasNext = await driver.getNextPage()
+                    if (!hasNext) {
+                        log.debug('No more pages available', { totalPages: pageNum })
+                        break
+                    }
+                    
+                    pageNum++
+                } catch (error) {
+                    log.error("Error scraping chapter page", error, { page: pageNum })
+                    break
+                }
+            }
+            
+        } else {
+            log.debug('Using brute force', { chapter: chapterIndex })
+            
+            const firstImgSrc = await driver.getChapterLink()
+            let pageUrl = Url.fromString(firstImgSrc)
+            
+            while (true) {
+                try {
+                    const res = await driver.page.goto(pageUrl.render())
+                    log.chapterPage(chapterIndex, pageNum, pageUrl.render())
+                    
+                    if (!res.ok()) throw new Error(`HTTP ${res.status()}`)
+                    
+                    const outputPath = await pathParser.resolveAndEnsure({
+                        chap: chapterIndex,
+                        page: pageNum
+                    })
+
+                    const img = await driver.getPage()
+                    if (!img) throw new Error("Page image not found")
+                    
+                    await img.screenshot({ path: outputPath })
+                    pages.push({ url: pageUrl.render(), path: outputPath })
+                    
+                    pageUrl.incFile()
+                    pageNum++
+                } catch (error) {
+                    log.debug("Reached end of chapter pages", { totalPages: pageNum - 1 })
+                    break
+                }
             }
         }
         
+        log.chapterComplete(chapterIndex, pages.length)
         return { chapterIndex, chapterUrl: chapterUrl.render(), pages }
+        
     } catch (error) {
         log.chapterError(chapterIndex, error, chapterUrl.render())
         return {
@@ -64,7 +147,7 @@ export async function defaultScrape(driver, options = {}) {
     const out = []
     
     for (let i = 0; i < chapLinks.length; i++) {
-        const res = await scrapeChapter(driver, chapLinks[i], i + 1, pathParser)
+        const res = await scrapeChapter(driver, chapLinks[i], i + 1, pathParser, options)
         out.push(res)
     }
     
@@ -302,7 +385,7 @@ function makeItemRunner(coreFn) {
         
         if (coreFn === defaultScrape) {
             const pathParser = parseOutputOptions(options)
-            return scrapeChapter(driver, chapLink, chapterIndex, pathParser)
+            return scrapeChapter(driver, chapLink, chapterIndex, pathParser, options)
         }
         return coreFn(driver, { ...options, startUrl: chapLink.render() })
     }
@@ -420,17 +503,20 @@ export async function processParallel(coreFn, exec, opt = {}) {
 }
 
 export async function processBatch(coreFn, exec, opt = {}) {
-    const driver = exec.drivers.getDriver()
     const options = { ...exec.opt, ...opt }
-    const { batchSize } = options
+    const { batchSize = 10 } = options
 
     log.info('Starting batch processing', { 
         method: coreFn.name,
         batchSize 
     })
-    
-    await driver.go(options?.startUrl)
-    const chapLinks = await driver.getAllChapterLinks()
+
+    let chapLinks
+
+    await exec.lock(async (driver) => {
+        await driver.go(options?.startUrl)
+        chapLinks = await driver.getAllChapterLinks()
+    })
     
     log.debug('Retrieved chapters for batch processing', { 
         totalChapters: chapLinks.length,
@@ -452,7 +538,10 @@ export async function processBatch(coreFn, exec, opt = {}) {
             const chapterIndex = i + j + 1
             
             try {
-                const raw = await makeItemRunner(coreFn)(driver, chapLink, chapterIndex, options)
+                let raw
+                await exec.lock(async (driver) => {
+                    raw = await makeItemRunner(coreFn)(driver, chapLink, chapterIndex, options)
+                })
                 const norm = await normalizeResult(coreFn, raw, exec.startAt, 'batch')
                 norm.forEach(n => allResults.push(n))
             } catch (err) {
@@ -488,70 +577,13 @@ const Modes = {
     batch: processBatch
 }
 
-class RateLimiter {
-    constructor(reqsPerSecond = Infinity) {
-        this.reqsPerSecond = reqsPerSecond
-        this.intervalMs = reqsPerSecond === Infinity ? 0 : 1000 / reqsPerSecond
-        this.lastRequestTime = 0
-        this.queue = []
-        this.processing = false
-        
-        log.info('Rate limiter initialized', { 
-            reqsPerSecond: reqsPerSecond === Infinity ? 'unlimited' : reqsPerSecond,
-            intervalMs: this.intervalMs 
-        })
-    }
-
-    async throttle() {
-        if (this.reqsPerSecond === Infinity) return
-
-        return new Promise((resolve) => {
-            this.queue.push(resolve)
-            this._processQueue()
-        })
-    }
-
-    async _processQueue() {
-        if (this.processing || this.queue.length === 0) return
-        
-        this.processing = true
-        const now = Date.now()
-        const timeSinceLastRequest = now - this.lastRequestTime
-        const waitTime = Math.max(0, this.intervalMs - timeSinceLastRequest)
-        
-        if (waitTime > 0) {
-            log.debug('Rate limit throttling', { waitMs: waitTime })
-            await new Promise(resolve => setTimeout(resolve, waitTime))
-        }
-        
-        this.lastRequestTime = Date.now()
-        const resolve = this.queue.shift()
-        this.processing = false
-        
-        resolve()
-        
-        if (this.queue.length > 0) {
-            this._processQueue()
-        }
-    }
-
-    getStats() {
-        return {
-            reqsPerSecond: this.reqsPerSecond,
-            intervalMs: this.intervalMs,
-            queueLength: this.queue.length,
-            lastRequestTime: this.lastRequestTime
-        }
-    }
-}
-
 export class ScrapingExecution {
     constructor(opt={}) {
         opt = {
             proxy: new ProxyPool(),
             context_usage: 'multi-context',
             concurrency: 3,
-            rateLimit: Infinity,
+            rateLimit: 'auto', // 'auto' || 100 / 60 || Infinity
             global_search_keys: [
                 'link', 'banner', 'title',
                 'type', 'author', 'artist',
@@ -563,7 +595,20 @@ export class ScrapingExecution {
         this.drivers = new DriverPool(opt)
         this.opt = opt
         this.startAt = null
-        this.rateLimiter = new RateLimiter(opt.rateLimit)
+        
+        // Initialize rate limiter based on config
+        if (opt.rateLimit === 'auto') {
+            this.rateLimiter = RateLimiter({ mode: 'auto' })
+            log.info('Rate limiter initialized in auto mode, will configure after first test')
+        } else {
+            this.rateLimiter = RateLimiter({ 
+                mode: 'manual',
+                reqsPerSecond: opt.rateLimit
+            })
+            log.info('Rate limiter initialized in manual mode', { 
+                reqsPerSecond: opt.rateLimit 
+            })
+        }
     }
 
     isValid() {
@@ -588,10 +633,25 @@ export class ScrapingExecution {
         
         log.debug('Request completed', { 
             durationMs: duration,
-            rateLimitStats: this.rateLimiter.getStats()
+            rateLimitConfig: this.rateLimiter.getConfig()
         })
         
         return result
+    }
+
+    async testRateLimit(options = {}) {
+        log.info('Testing rate limit for execution')
+        
+        let stats
+        await this.lock(async (driver) => {
+            stats = await RateLimitTester(driver, options)
+        })
+        
+        if (this.rateLimiter.getConfig().mode === 'auto') {
+            this.rateLimiter.configureFromStats(stats)
+        }
+        
+        return stats
     }
 
     async process(method="default", mode="single", opt={}) {
@@ -602,6 +662,12 @@ export class ScrapingExecution {
             mode = Modes?.[mode]
             if (!mode) throw new Error('Invalid mode.')
 
+            const limiterConfig = this.rateLimiter.getConfig()
+            if (limiterConfig.mode === 'auto' && !limiterConfig.isConfigured) {
+                log.info('Running test packages to driver endpoint to get best perfomance...')
+                await this.testRateLimit()
+            }
+
             this.startAt = Date.now()
             const results = await mode?.(method, this, opt)
             
@@ -610,7 +676,7 @@ export class ScrapingExecution {
                 method: method.name,
                 mode: mode.name,
                 totalTimeMs: totalTime,
-                rateLimitStats: this.rateLimiter.getStats()
+                rateLimitConfig: this.rateLimiter.getConfig()
             })
             
             return results
@@ -630,30 +696,47 @@ export class ScrapingExecution {
     static withOptions(opt={}) {
         const self = this.copy()
         self.opt = { ...self.opt, ...opt }
-        self.rateLimiter = new RateLimiter(self.opt.rateLimit)
+        
+        // Ratelimit rebuild
+        if ('rateLimit' in opt) {
+            if (opt.rateLimit === 'auto') {
+                self.rateLimiter = RateLimiter({ mode: 'auto' })
+            } else {
+                self.rateLimiter = RateLimiter({ 
+                    mode: 'manual',
+                    reqsPerSecond: opt.rateLimit
+                })
+            }
+        }
+        
         return self
     }
 
     addOption(opt={}) {
         this.opt = { ...this.opt, ...opt }
         
+        // Ratelimit rebuild
         if ('rateLimit' in opt) {
-            this.rateLimiter = new RateLimiter(opt.rateLimit)
-            log.info('Rate limiter updated', { 
-                newRateLimit: opt.rateLimit 
-            })
+            if (opt.rateLimit === 'auto') {
+                this.rateLimiter = RateLimiter({ mode: 'auto' })
+                log.info('Rate limiter switched to auto mode')
+            } else {
+                this.rateLimiter.setRate(opt.rateLimit)
+            }
         }
     }
 
-    setRateLimit(reqsPerPeriod, periodSeconds = 1) {
-        const reqsPerSecond = reqsPerPeriod / periodSeconds
+    setRateLimit(reqsPerSecond) {
         this.opt.rateLimit = reqsPerSecond
-        this.rateLimiter = new RateLimiter(reqsPerSecond)
-        
-        log.info('Rate limit configured', { 
-            reqsPerPeriod,
-            periodSeconds,
-            effectiveReqsPerSecond: reqsPerSecond
-        })
+        this.rateLimiter.setRate(reqsPerSecond)
+    }
+
+    getRateLimitConfig() {
+        return this.rateLimiter.getConfig()
+    }
+
+    resetRateLimitToAuto() {
+        this.opt.rateLimit = 'auto'
+        this.rateLimiter.resetToAuto()
     }
 }
