@@ -1,0 +1,27 @@
+{
+  "drivers": {
+    "mangaworld": {
+      "reqsPerSecond": 75,
+      "lastSuccessfulRate": 90,
+      "avgResponseTime": "410",
+      "totalRequests": 125,
+      "successfulRequests": 125,
+      "failedRequests": 0,
+      "safetyMargin": "80%",
+      "testedAt": "2025-10-30T20:31:54.776Z",
+      "testDuration": "53.81"
+    },
+    "mangadex": {
+      "reqsPerSecond": 48,
+      "lastSuccessfulRate": 60,
+      "avgResponseTime": "79",
+      "totalRequests": 307,
+      "successfulRequests": 301,
+      "failedRequests": 6,
+      "safetyMargin": "80%",
+      "testedAt": "2025-10-30T21:10:54.033Z",
+      "testDuration": "32.25"
+    }
+  },
+  "lastUpdated": "2025-10-30T21:10:54.033Z"
+}

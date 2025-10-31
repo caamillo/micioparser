@@ -1,8 +1,26 @@
 import { Url, ProxyPool } from "./utils.js"
 import log from "./log.js"
 import { parseOutputOptions } from "./path.js"
-import { DriverPool } from "./driver.js"
-import { RateLimiter, RateLimitTester } from "./rate-limiter.js"
+import { DriverPool, Connectors } from "./driver.js"
+import { RateLimiter, RateLimitTester } from "./ratelimit.js"
+import { getSettings } from "./settings.js"
+import WebSocket from 'ws'
+
+const ws = new WebSocket('ws://localhost:8080')
+
+ws.on('open', () => {
+  log.attachStream(ws)
+  log.info('Log stream attached to WS')
+})
+
+ws.on('close', () => {
+  log.detachStream(ws)
+  log.info('Log stream detached from WS')
+})
+
+ws.on('error', err => {
+  log.warn('Log WS error', { message: err.message })
+})
 
 async function scrapeChapter(driver, chapterUrl, chapterIndex, pathParser, options = {}) {
     log.chapterStart(chapterIndex, chapterUrl.render())
@@ -31,10 +49,18 @@ async function scrapeChapter(driver, chapterUrl, chapterIndex, pathParser, optio
                 try {
                     log.chapterPage(chapterIndex, pageNum, driver.page.url())
                     
-                    const outputPath = await pathParser.resolveAndEnsure({
+                    const pathVars = {
                         chap: chapterIndex,
                         page: pageNum
-                    })
+                    }
+                    
+                    // Add optional variables if provided or if pattern needs them
+                    if (options.title) pathVars.title = options.title
+                    if (options.vol !== undefined) pathVars.vol = options.vol
+                    // If pattern needs vol but not provided, default to 1
+                    else if (pathParser.pattern.includes('$vol')) pathVars.vol = 1
+                    
+                    const outputPath = await pathParser.resolveAndEnsure(pathVars)
 
                     const img = await driver.getPage()
                     if (!img) throw new Error("Page image not found")
@@ -65,10 +91,18 @@ async function scrapeChapter(driver, chapterUrl, chapterIndex, pathParser, optio
                 try {
                     log.chapterPage(chapterIndex, pageNum, driver.page.url())
                     
-                    const outputPath = await pathParser.resolveAndEnsure({
+                    const pathVars = {
                         chap: chapterIndex,
                         page: pageNum
-                    })
+                    }
+                    
+                    // Add optional variables if provided or if pattern needs them
+                    if (options.title) pathVars.title = options.title
+                    if (options.vol !== undefined) pathVars.vol = options.vol
+                    // If pattern needs vol but not provided, default to 0
+                    else if (pathParser.pattern.includes('$vol')) pathVars.vol = 0
+                    
+                    const outputPath = await pathParser.resolveAndEnsure(pathVars)
 
                     const img = await driver.getPage()
                     if (!img) throw new Error("Page image not found")
@@ -102,10 +136,18 @@ async function scrapeChapter(driver, chapterUrl, chapterIndex, pathParser, optio
                     
                     if (!res.ok()) throw new Error(`HTTP ${res.status()}`)
                     
-                    const outputPath = await pathParser.resolveAndEnsure({
+                    const pathVars = {
                         chap: chapterIndex,
                         page: pageNum
-                    })
+                    }
+                    
+                    // Add optional variables if provided or if pattern needs them
+                    if (options.title) pathVars.title = options.title
+                    if (options.vol !== undefined) pathVars.vol = options.vol
+                    // If pattern needs vol but not provided, default to 0
+                    else if (pathParser.pattern.includes('$vol')) pathVars.vol = 0
+                    
+                    const outputPath = await pathParser.resolveAndEnsure(pathVars)
 
                     const img = await driver.getPage()
                     if (!img) throw new Error("Page image not found")
@@ -140,15 +182,31 @@ export async function defaultScrape(driver, options = {}) {
     log.info('Starting default scrape')
     
     const pathParser = parseOutputOptions(options)
-    const chapLinks = await driver.getAllChapterLinks()
+    const volumes = await driver.getAllChapterLinks()
 
-    log.debug('Retrieved chapter links', { count: chapLinks.length })
+    log.debug('Retrieved volumes and chapters', { 
+        volumes: volumes.length,
+        totalChapters: volumes.reduce((sum, v) => sum + v.chapters.length, 0)
+    })
     
     const out = []
+    let chapterIndex = 1
     
-    for (let i = 0; i < chapLinks.length; i++) {
-        const res = await scrapeChapter(driver, chapLinks[i], i + 1, pathParser, options)
-        out.push(res)
+    // Iterate through each volume
+    for (const volume of volumes) {
+        // Iterate through each chapter in the volume
+        for (const chapterUrl of volume.chapters) {
+            const opts = { ...options }
+            
+            // Pass the volume number if available
+            if (volume.volume) {
+                opts.vol = volume.volume
+            }
+            
+            const res = await scrapeChapter(driver, chapterUrl, chapterIndex, pathParser, opts)
+            out.push(res)
+            chapterIndex++
+        }
     }
     
     log.scrapeComplete({ chapters: out.length })
@@ -157,21 +215,26 @@ export async function defaultScrape(driver, options = {}) {
 
 export async function bruteScrape(driver, options = {}) {
     const { 
-        startUrl, 
+        target, 
         maxAttempts = 10, 
         onProgress = null,
         stopOnError = false 
     } = options
     
-    if (!startUrl) {
-        const error = new Error('startUrl is required for bruteforce')
+    // Extract URL from target
+    const targetUrl = typeof target === 'object' 
+        ? (target.link || target.url)
+        : target
+    
+    if (!targetUrl) {
+        const error = new Error('target is required for bruteforce')
         log.error('Bruteforce scrape configuration error', error)
         throw error
     }
     
     const pathParser = parseOutputOptions(options)
     log.info('Starting bruteforce scrape', { 
-        startUrl, 
+        target: targetUrl, 
         maxAttempts, 
         outputPattern: pathParser.pattern 
     })
@@ -181,12 +244,12 @@ export async function bruteScrape(driver, options = {}) {
     let currentChap = 1
     
     try {
-        const firstCh = Url.fromString(startUrl)
+        const firstCh = Url.fromString(targetUrl)
         log.debug('Navigating to start URL', { url: firstCh.render() })
         
         const navRes = await driver.page.goto(firstCh.render())
         if (!navRes.ok()) {
-            const error = new Error(`Failed to navigate to startUrl: ${firstCh.render()}`)
+            const error = new Error(`Failed to navigate to target: ${firstCh.render()}`)
             log.navigationError(firstCh.render(), error)
             throw error
         }
@@ -223,11 +286,16 @@ export async function bruteScrape(driver, options = {}) {
                 
                 resetState()
                 
-                const outputPath = await pathParser.resolveAndEnsure({
+                const pathVars = {
                     vol: currentVol,
                     chap: currentChap,
                     page: stats.pagesScraped + 1
-                })
+                }
+                
+                // Only add title if provided
+                if (options.title) pathVars.title = options.title
+                
+                const outputPath = await pathParser.resolveAndEnsure(pathVars)
                 
                 await driver.page.screenshot({ path: outputPath, fullPage: true })
                 
@@ -376,18 +444,34 @@ export async function bruteScrape(driver, options = {}) {
 }
 
 function makeItemRunner(coreFn) {
-    return async (driver, chapLink, chapterIndex, options = {}) => {
+    return async (driver, item, chapterIndex, options = {}) => {
         log.debug('Running item', { 
             method: coreFn.name,
             chapterIndex,
-            url: chapLink.render() 
+            url: item.render ? item.render() : (item.link || item.url)
         })
         
         if (coreFn === defaultScrape) {
             const pathParser = parseOutputOptions(options)
-            return scrapeChapter(driver, chapLink, chapterIndex, pathParser, options)
+            
+            // Handle different item types
+            let chapterUrl = item
+            let volumeOpts = { ...options }
+            
+            // If it's a volume chapter object, extract the URL and volume info
+            if (item.url) {
+                chapterUrl = item.url
+            }
+            if (item.volume && !volumeOpts.vol) {
+                volumeOpts.vol = item.volume
+            }
+            
+            return scrapeChapter(driver, chapterUrl, chapterIndex, pathParser, volumeOpts)
         }
-        return coreFn(driver, { ...options, startUrl: chapLink.render() })
+        
+        // For bruteScrape, convert item to target
+        const targetUrl = item.render ? item.render() : (item.link || item.url)
+        return coreFn(driver, { ...options, target: targetUrl })
     }
 }
 
@@ -416,9 +500,34 @@ export async function processSingle(coreFn, exec, opt = {}) {
     const options = { ...exec.opt, ...opt }
 
     log.info('Starting single processing', { method: coreFn.name })
+    
+    // Handle target parameter (can be URL string or book object)
+    let targetUrl = options.target
+    
+    if (!targetUrl) {
+        log.error('Target is required for processing', new Error('Missing target parameter'))
+        throw new Error('Target is required. Please provide { target: bookObject } or { target: "url" }')
+    }
+    
+    if (typeof options.target === 'object') {
+        // Extract title if pattern needs it
+        if (!options.title && exec.opt.outputPath?.includes('$title') && options.target.title) {
+            options.title = options.target.title
+            log.debug('Extracted title from target object', { title: options.title })
+        }
+        targetUrl = options.target.link || options.target.url
+        
+        if (!targetUrl) {
+            log.error('Target object missing link/url property', new Error('Invalid target object'))
+            throw new Error('Target object must have either "link" or "url" property')
+        }
+    }
+    
+    log.debug('Processing with target', { targetUrl, title: options.title })
+    
     let results
     await exec.lock(async (driver) => {
-        await driver.go(options.startUrl)
+        await driver.go(targetUrl)
         const raw = await coreFn(driver, options)
         results = await normalizeResult(coreFn, raw, exec.startAt, 'single')
         
@@ -438,12 +547,34 @@ export async function processParallel(coreFn, exec, opt = {}) {
         ...options
     })
 
-    let chapLinks
-    
+    // Handle target parameter (can be URL string or book object)
+    let targetUrl = options.target
+    if (typeof options.target === 'object') {
+        // Extract title if pattern needs it
+        if (!options.title && exec.opt.outputPath?.includes('$title') && options.target.title) {
+            options.title = options.target.title
+            log.debug('Extracted title from target object', { title: options.title })
+        }
+        targetUrl = options.target.link || options.target.url || options.target
+    }
+
+    let volumes
+
     await exec.lock(async (driver) => {
-        await driver.go(options?.startUrl)
-        chapLinks = await driver.getAllChapterLinks()
+        await driver.go(targetUrl)
+        volumes = await driver.getAllChapterLinks()
     })
+
+    // Flatten all chapters from all volumes
+    let chapLinks = []
+    for (const volume of volumes) {
+        for (const chapterUrl of volume.chapters) {
+            chapLinks.push({
+                url: chapterUrl,
+                volume: volume.volume
+            })
+        }
+    }
     
     log.debug('Retrieved chapters for parallel processing', { 
         totalChapters: chapLinks.length,
@@ -511,12 +642,34 @@ export async function processBatch(coreFn, exec, opt = {}) {
         batchSize 
     })
 
-    let chapLinks
+    // Handle target parameter (can be URL string or book object)
+    let targetUrl = options.target
+    if (typeof options.target === 'object') {
+        // Extract title if pattern needs it
+        if (!options.title && exec.opt.outputPath?.includes('$title') && options.target.title) {
+            options.title = options.target.title
+            log.debug('Extracted title from target object', { title: options.title })
+        }
+        targetUrl = options.target.link || options.target.url || options.target
+    }
+
+    let volumes
 
     await exec.lock(async (driver) => {
-        await driver.go(options?.startUrl)
-        chapLinks = await driver.getAllChapterLinks()
+        await driver.go(targetUrl)
+        volumes = await driver.getAllChapterLinks()
     })
+
+    // Flatten all chapters from all volumes
+    const chapLinks = []
+    for (const volume of volumes) {
+        for (const chapterUrl of volume.chapters) {
+            chapLinks.push({
+                url: chapterUrl,
+                volume: volume.volume
+            })
+        }
+    }
     
     log.debug('Retrieved chapters for batch processing', { 
         totalChapters: chapLinks.length,
@@ -582,8 +735,11 @@ export class ScrapingExecution {
         opt = {
             proxy: new ProxyPool(),
             context_usage: 'multi-context',
+            outputPath: 'downloads/$title/$vol/$chap/$page.png',
             concurrency: 3,
-            rateLimit: 'auto', // 'auto' || 100 / 60 || Infinity
+            rateLimit: 'auto',
+            testIfMissing: true, // Auto rate-limit test if config not found
+            maxConfigAge: 30, // Days before config is considered stale
             global_search_keys: [
                 'link', 'banner', 'title',
                 'type', 'author', 'artist',
@@ -595,11 +751,15 @@ export class ScrapingExecution {
         this.drivers = new DriverPool(opt)
         this.opt = opt
         this.startAt = null
+        this.settings = null
         
-        // Initialize rate limiter based on config
+        // Track connector-specific driver indices for sequential searches
+        this.connectorIndices = {}
+        
+        // Initialize rate limiter
         if (opt.rateLimit === 'auto') {
             this.rateLimiter = RateLimiter({ mode: 'auto' })
-            log.info('Rate limiter initialized in auto mode, will configure after first test')
+            log.info('Rate limiter initialized in auto mode')
         } else {
             this.rateLimiter = RateLimiter({ 
                 mode: 'manual',
@@ -609,17 +769,437 @@ export class ScrapingExecution {
                 reqsPerSecond: opt.rateLimit 
             })
         }
+        
+        this._loadSettings()
     }
-
-    isValid() {
-        return this.drivers.isValid()
+    
+    async _loadSettings() {
+        try {
+            this.settings = await getSettings()
+            log.info('Settings loaded for execution')
+        } catch (error) {
+            log.error('Failed to load settings', error)
+        }
     }
-
-    copy() {
-        return Object.create(
-            Object.getPrototypeOf(this),
-            Object.getOwnPropertyDescriptors(this)
+    
+    async _ensureSettings() {
+        if (!this.settings) {
+            await this._loadSettings()
+        }
+    }
+    
+    /**
+     * Configure rate limiter from settings or test
+     * @private
+     * @param {string} connectorName - Connector to configure for
+     * @param {boolean} skipTest - Skip testing if config missing (default: false)
+     */
+    async _configureRateLimiter(connectorName, skipTest = false) {
+        await this._ensureSettings()
+        
+        // If using manual rate limit, skip
+        if (this.opt.rateLimit !== 'auto') {
+            log.debug('Manual rate limit set, skipping auto-configuration')
+            return
+        }
+        
+        // If already configured for this connector, skip
+        const currentConfig = this.rateLimiter.getConfig()
+        if (currentConfig.isConfigured && currentConfig._lastConnector === connectorName) {
+            log.debug('Rate limiter already configured for connector', { connector: connectorName })
+            return
+        }
+        
+        // Check if configuration is saved
+        if (this.settings && this.settings.hasDriverConfig(connectorName)) {
+            const config = this.settings.getDriverConfig(connectorName)
+            
+            // Check if config is stale
+            if (this.settings.isConfigStale(connectorName, this.opt.maxConfigAge)) {
+                log.warn('Driver configuration is stale, will re-test', {
+                    connector: connectorName,
+                    maxAge: `${this.opt.maxConfigAge} days`
+                })
+                
+                if (this.opt.testIfMissing && !skipTest) {
+                    await this._testAndSaveRateLimit(connectorName)
+                }
+            } else {
+                // Use saved configuration
+                this.rateLimiter.setRate(config.reqsPerSecond)
+                this.rateLimiter._lastConnector = connectorName
+                log.success('Using saved rate limit configuration', {
+                    connector: connectorName,
+                    reqsPerSecond: config.reqsPerSecond,
+                    testedAt: config.testedAt
+                })
+            }
+        } else {
+            // No configuration found
+            log.info('No configuration found for connector', { connector: connectorName })
+            
+            if (this.opt.testIfMissing && !skipTest) {
+                await this._testAndSaveRateLimit(connectorName)
+            }
+        }
+    }
+    
+    /**
+     * Test rate limit and save to settings
+     * @private
+     * @param {string} connectorName - Connector to test
+     */
+    async _testAndSaveRateLimit(connectorName) {
+        log.info('Testing rate limit for connector', { connector: connectorName })
+        
+        const driver = this._getConnectorDriver(connectorName)
+        if (!driver) {
+            throw new Error(`No driver available for connector: ${connectorName}`)
+        }
+        
+        // Disable rate limiting during test
+        const originalMode = this.rateLimiter.getConfig().mode
+        this.rateLimiter.setRate(Infinity)
+        
+        let stats
+        await driver.exec(async (driverApi) => {
+            stats = await RateLimitTester(driverApi, {})
+        })
+        
+        // Restore and configure rate limiter
+        if (originalMode === 'auto') {
+            this.rateLimiter.configureFromStats(stats)
+            this.rateLimiter._lastConnector = connectorName
+        }
+        
+        // Save to settings if enabled
+        if (this.settings) {
+            await this.settings.setDriverConfig(connectorName, stats)
+        }
+    }
+    
+    /**
+     * Initialize global search by creating drivers for all connectors
+     * @private
+     * @param {string} browser - Browser to use (default: 'chromium')
+     */
+    async _initGlobalSearch(browser='chromium') {
+        log.info('Initializing global search', { 
+            connectors: Object.keys(Connectors),
+            browser 
+        })
+        
+        // Build drivers for all connectors
+        const driverConfigs = Object.keys(Connectors).map(cnt => [cnt, browser])
+        
+        // Create new pool or clear existing
+        const pool = new DriverPool(this.opt)
+        await Promise.all(
+            driverConfigs.map(async ([connector, browser]) => 
+                await pool.addDriver(connector, browser, this.opt)
+            )
         )
+        this.drivers = pool
+        
+        // Initialize connector indices
+        this.connectorIndices = {}
+        for (const connectorId of Object.keys(Connectors)) {
+            this.connectorIndices[connectorId] = 0
+        }
+        
+        log.success('Global search initialized', { 
+            connectors: Object.keys(Connectors),
+            driversCount: this.drivers.length(),
+            browser 
+        })
+    }
+
+    /**
+     * Get the next available driver for a specific connector
+     * @param {string} connectorId - The connector to get a driver for
+     * @returns {Driver|null} The next driver for this connector
+     */
+    _getConnectorDriver(connectorId) {
+        if (!this.drivers.isValid()) return null
+        
+        // Find all drivers with this connector
+        const matchingDrivers = this.drivers.pool.filter(
+            d => d.connector_id === connectorId
+        )
+        
+        if (!matchingDrivers.length) {
+            log.warn('No drivers found for connector', { connectorId })
+            return null
+        }
+        
+        // Get current index for this connector (initialize if needed)
+        if (!(connectorId in this.connectorIndices)) {
+            this.connectorIndices[connectorId] = 0
+        }
+        
+        // Get driver and rotate index
+        const driver = matchingDrivers[this.connectorIndices[connectorId]]
+        this.connectorIndices[connectorId] = 
+            (this.connectorIndices[connectorId] + 1) % matchingDrivers.length
+        
+        return driver
+    }
+
+    /**
+     * Execute a function with a specific connector's driver
+     * @param {string} connectorId - The connector to use
+     * @param {Function} fn - The function to execute with the driver
+     */
+    async lockConnector(connectorId, fn) {
+        if (!this.isValid()) {
+            throw new Error('ScrapingExecution is not valid')
+        }
+        
+        const driver = this._getConnectorDriver(connectorId)
+        if (!driver) {
+            throw new Error(`No driver available for connector: ${connectorId}`)
+        }
+        
+        // Configure rate limiter for this connector if needed
+        await this._configureRateLimiter(connectorId)
+        
+        await this.rateLimiter.throttle()
+        
+        const startTime = Date.now()
+        const result = await driver.exec(fn)
+        const duration = Date.now() - startTime
+        
+        log.debug('Connector request completed', { 
+            connector: connectorId,
+            durationMs: duration,
+            rateLimitConfig: this.rateLimiter.getConfig()
+        })
+        
+        return result
+    }
+
+    /**
+     * Search for a title across manga sources
+     * @param {string} title - The title to search for
+     * @param {string|null} connector - could be:
+     *   - null: Progressive search (rotates through all connectors)
+     *   - 'connector_name': Search only on specific connector
+     *   - '*': Search on all connectors simultaneously
+     * @param {Object} options - Search options
+     * @param {boolean} options.sequential - If true, searches one at a time (default: true)
+     * @returns {Promise<Object|Array>} Search results
+     */
+    async search(title, connector=null, options={}) {
+        const { sequential = true, browser = 'chromium' } = options
+        
+        // 1: Search on all connectors
+        if (connector === '*') {
+            // Check if we need to initialize global search
+            const needsInit = !this.drivers.isValid() || 
+                Object.keys(Connectors).some(connectorId => {
+                    return !this.drivers.pool.some(d => d.connector_id === connectorId)
+                })
+            
+            if (needsInit) {
+                log.info('Global search not initialized, auto-initializing...', { browser })
+                await this._initGlobalSearch(browser)
+            }
+            
+            if (!this.isValid()) {
+                throw new Error('Failed to initialize global search')
+            }
+            
+            log.info('Starting global search on all connectors', { 
+                title,
+                mode: sequential ? 'sequential' : 'parallel'
+            })
+            
+            const availableConnectors = Object.keys(Connectors).filter(connectorId => {
+                const hasDriver = this.drivers.pool.some(
+                    d => d.connector_id === connectorId
+                )
+                
+                if (!hasDriver) {
+                    log.warn('Skipping connector (no driver available)', { 
+                        connector: connectorId 
+                    })
+                }
+                
+                return hasDriver
+            })
+            
+            let results = []
+            
+            if (sequential) {
+                // Sequential execution - one at a time
+                for (const connectorId of availableConnectors) {
+                    try {
+                        const connectorResults = await this.lockConnector(
+                            connectorId,
+                            async (driver) => await driver.search(title)
+                        )
+                        
+                        results.push({
+                            connector: connectorId,
+                            success: true,
+                            results: connectorResults,
+                            count: connectorResults?.length || 0
+                        })
+                        
+                        log.success('Connector search completed', {
+                            connector: connectorId,
+                            resultsCount: connectorResults?.length || 0
+                        })
+                    } catch (error) {
+                        log.error('Connector search failed', error, { 
+                            connector: connectorId 
+                        })
+                        
+                        results.push({
+                            connector: connectorId,
+                            success: false,
+                            error: error.message,
+                            results: []
+                        })
+                    }
+                }
+            } else {
+                // Parallel execution - all at once
+                const searchPromises = availableConnectors.map(async (connectorId) => {
+                    try {
+                        const connectorResults = await this.lockConnector(
+                            connectorId,
+                            async (driver) => await driver.search(title)
+                        )
+                        
+                        log.success('Connector search completed', {
+                            connector: connectorId,
+                            resultsCount: connectorResults?.length || 0
+                        })
+                        
+                        return {
+                            connector: connectorId,
+                            success: true,
+                            results: connectorResults,
+                            count: connectorResults?.length || 0
+                        }
+                    } catch (error) {
+                        log.error('Connector search failed', error, { 
+                            connector: connectorId 
+                        })
+                        
+                        return {
+                            connector: connectorId,
+                            success: false,
+                            error: error.message,
+                            results: []
+                        }
+                    }
+                })
+                
+                results = await Promise.all(searchPromises)
+            }
+            
+            const totalResults = results.reduce(
+                (sum, r) => sum + (r.count || 0), 
+                0
+            )
+            
+            log.success('Global search completed', {
+                title,
+                mode: sequential ? 'sequential' : 'parallel',
+                connectors: results.length,
+                totalResults
+            })
+            
+            return results
+        }
+        
+        // 2: Search on specific connector
+        if (connector && typeof connector === 'string') {
+            if (!(connector in Connectors)) {
+                throw new Error(`Unknown connector: ${connector}`)
+            }
+            
+            // Check if we need to initialize this specific connector
+            const hasConnectorDriver = this.drivers.pool.some(
+                d => d.connector_id === connector
+            )
+            
+            if (!hasConnectorDriver) {
+                log.info('Connector not initialized, auto-initializing...', { 
+                    connector,
+                    browser 
+                })
+                
+                // Initialize only this connector
+                const pool = new DriverPool(this.opt)
+                await pool.addDriver(connector, browser, this.opt)
+                this.drivers = pool
+                
+                // Initialize connector index
+                if (!this.connectorIndices[connector]) {
+                    this.connectorIndices[connector] = 0
+                }
+                
+                log.success('Connector initialized', { connector })
+            }
+            
+            if (!this.isValid()) {
+                throw new Error('Failed to initialize connector')
+            }
+            
+            log.info('Starting targeted search', { 
+                title, 
+                connector 
+            })
+            
+            const results = await this.lockConnector(
+                connector,
+                async (driver) => await driver.search(title)
+            )
+            
+            log.success('Targeted search completed', {
+                connector,
+                resultsCount: results?.length || 0
+            })
+            
+            return {
+                connector,
+                success: true,
+                results,
+                count: results?.length || 0
+            }
+        }
+        
+        // 3: Progressive search (round-robin through available connectors)
+        if (!this.isValid()) {
+            throw new Error('ScrapingExecution is not valid. Initialize drivers first.')
+        }
+        
+        log.info('Starting progressive search', { title })
+        
+        // Use standard lock which rotates through all drivers
+        const results = await this.lock(
+            async (driver) => await driver.search(title)
+        )
+        
+        // Get the connector that was used (from the driver that was selected)
+        const usedDriver = this.drivers.pool[
+            (this.drivers.idx - 1 + this.drivers.pool.length) % this.drivers.pool.length
+        ]
+        
+        log.success('Progressive search completed', {
+            connector: usedDriver?.connector_id,
+            resultsCount: results?.length || 0
+        })
+        
+        return {
+            connector: usedDriver?.connector_id,
+            success: true,
+            results,
+            count: results?.length || 0
+        }
     }
 
     async lock(fn) {
@@ -637,6 +1217,10 @@ export class ScrapingExecution {
         })
         
         return result
+    }
+
+    isValid() {
+        return this.drivers.isValid()
     }
 
     async testRateLimit(options = {}) {

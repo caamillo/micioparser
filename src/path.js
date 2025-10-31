@@ -4,12 +4,13 @@ import log from './log.js'
 
 /**
  * Parses and resolves output path patterns with variable substitution
- * Supported variables: $vol, $chap, $page, $ext
+ * Supported variables: $title, $vol, $chap, $page, $ext
  * 
  * Examples:
- * - "output/vol-$vol/chap-$chap/page-$page.$ext"
- * - "downloads/$vol-$chap-$page.$ext"
- * - "manga/volume_$vol/chapter_$chap_page_$page.$ext"
+ * - "output/$title/vol-$vol/chap-$chap/page-$page.$ext"
+ * - "downloads/$title/$vol-$chap-$page.$ext"
+ * - "manga/$title/volume_$vol/chapter_$chap_page_$page.$ext"
+ * - "output/chapter_$chap/page_$page.$ext" (no title needed)
  */
 
 const DEFAULT_PATTERN = 'output/chapter_$chap/page_$page.$ext'
@@ -25,26 +26,58 @@ export class Path {
     /**
      * Parse and resolve a path pattern with given variables
      * @param {Object} vars - Variables to substitute
-     * @param {string|number} vars.vol - Volume number
-     * @param {string|number} vars.chap - Chapter number
-     * @param {string|number} vars.page - Page number
+     * @param {string} vars.title - Manga title (optional, only needed if pattern uses $title)
+     * @param {string|number} vars.vol - Volume number (optional, only needed if pattern uses $vol)
+     * @param {string|number} vars.chap - Chapter number (optional, only needed if pattern uses $chap)
+     * @param {string|number} vars.page - Page number (optional, only needed if pattern uses $page)
      * @param {string} vars.ext - File extension (optional, uses default if not provided)
      * @returns {string} Resolved file path
      */
     resolve(vars = {}) {
         const {
-            vol = '00',
-            chap = '00',
-            page = '00',
+            title,
+            vol,
+            chap,
+            page,
             ext = this.defaultExt
         } = vars
 
         let resolved = this.pattern
 
-        // Substitute variables
-        resolved = resolved.replace(/\$vol/g, this._pad(vol))
-        resolved = resolved.replace(/\$chap/g, this._pad(chap))
-        resolved = resolved.replace(/\$page/g, this._pad(page))
+        // Handle $title variable
+        if (resolved.includes('$title')) {
+            if (!title) {
+                throw new Error('Title variable is required in pattern but not provided in vars')
+            }
+            const sanitizedTitle = this._sanitizeTitle(title)
+            resolved = resolved.replace(/\$title/g, sanitizedTitle)
+        }
+
+        // Handle $vol variable
+        if (resolved.includes('$vol')) {
+            if (vol === undefined || vol === null) {
+                throw new Error('Volume variable is required in pattern but not provided in vars')
+            }
+            resolved = resolved.replace(/\$vol/g, this._pad(vol))
+        }
+
+        // Handle $chap variable
+        if (resolved.includes('$chap')) {
+            if (chap === undefined || chap === null) {
+                throw new Error('Chapter variable is required in pattern but not provided in vars')
+            }
+            resolved = resolved.replace(/\$chap/g, this._pad(chap))
+        }
+
+        // Handle $page variable
+        if (resolved.includes('$page')) {
+            if (page === undefined || page === null) {
+                throw new Error('Page variable is required in pattern but not provided in vars')
+            }
+            resolved = resolved.replace(/\$page/g, this._pad(page))
+        }
+
+        // Substitute extension
         resolved = resolved.replace(/\$ext/g, ext.replace(/^\./, '')) // Remove leading dot if present
 
         // Normalize path separators
@@ -100,6 +133,28 @@ export class Path {
         return str.padStart(length, '0')
     }
 
+    // Sanitize title for filesystem use
+    _sanitizeTitle(title) {
+        if (!title || typeof title !== 'string') {
+            throw new Error('Title must be a non-empty string')
+        }
+        
+        const sanitized = title
+            .trim()
+            // Replace invalid filesystem characters with underscore
+            .replace(/[<>:"|?*\/\\]/g, '_')
+            // Replace multiple spaces/underscores with single underscore
+            .replace(/[\s_]+/g, '_')
+            // Remove leading/trailing underscores
+            .replace(/^_+|_+$/g, '')
+        
+        if (!sanitized) {
+            throw new Error(`Title "${title}" becomes empty after sanitization`)
+        }
+        
+        return sanitized
+    }
+
     /**
      * Validate the pattern for correctness
      * @returns {Object} Validation result with isValid and errors
@@ -111,7 +166,7 @@ export class Path {
         // Check for invalid variable names
         const invalidVars = this.pattern.match(/\$[a-zA-Z_]+/g)
         if (invalidVars) {
-            const validVars = ['$vol', '$chap', '$page', '$ext']
+            const validVars = ['$title', '$vol', '$chap', '$page', '$ext']
             const invalid = invalidVars.filter(v => !validVars.includes(v))
             if (invalid.length > 0) {
                 errors.push(`Invalid variables found: ${invalid.join(', ')}. Valid: ${validVars.join(', ')}`)
@@ -144,6 +199,7 @@ export class Path {
         // Convert pattern to regex
         let regex = this.pattern
             .replace(/[.*+?^${}()|[\]\\]/g, '\\$&') // Escape regex special chars
+            .replace(/\\\$title/g, '(?<title>[^/\\\\]+)')
             .replace(/\\\$vol/g, '(?<vol>\\d+)')
             .replace(/\\\$chap/g, '(?<chap>\\d+)')
             .replace(/\\\$page/g, '(?<page>\\d+)')
@@ -156,6 +212,7 @@ export class Path {
         }
 
         return {
+            title: match.groups.title,
             vol: match.groups.vol,
             chap: match.groups.chap,
             page: match.groups.page,
@@ -189,6 +246,7 @@ export class Path {
         log.debug('Cleared directory cache')
     }
 }
+
 export function createPath(pattern, defaultExt = DEFAULT_EXTENSION) {
     const parser = new Path(pattern, defaultExt)
     const validation = parser.validate()

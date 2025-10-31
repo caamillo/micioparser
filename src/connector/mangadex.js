@@ -50,12 +50,12 @@ export default (driver) => ({
 
     getAllChapterLinks: async (opts = {}) => {
         log.debug('Retrieving all chapter links')
-
         const lang_idx = typeof opts.lang_idx === 'number' ? opts.lang_idx : 0
+        
         try {
             await driver.page.waitForTimeout(2000)
             
-            // Find and click the index button
+            // Click index button
             try {
                 await driver.page.waitForSelector('button.rounded.custom-opacity.relative.md-btn.text-sm > span', { 
                     timeout: 10000,
@@ -67,35 +67,33 @@ export default (driver) => ({
                     log.debug('Found index buttons', { count: idxBtns.length })
                     await idxBtns[1].click()
                     await driver.page.waitForTimeout(1000)
-                } else {
-                    log.debug('Index buttons not found or insufficient count, trying alternative approach')
                 }
             } catch (error) {
-                log.warn('Could not find index button, trying alternative selectors', { 
-                    error: error.message 
-                })
+                log.warn('Could not find index button', { error: error.message })
             }
-
-            // Get chapter links from modal
+            
+            // Get volume list
             let volumeLis = []
             try {
                 await driver.page.waitForSelector('.md-modal__box.flex-grow', { timeout: 5000 })
                 const modal = await driver.page.$('.md-modal__box.flex-grow')
                 if (modal) {
                     volumeLis = await modal.$$('ul > li')
-                    log.debug('Found chapters in modal', { volumes: volumeLis.length })
+                    log.debug('Found volumes in modal', { count: volumeLis.length })
                 }
             } catch (error) {
-                log.debug('Modal not found, trying direct chapter links')
+                log.debug('Modal not found')
             }
-
+            
             if (!volumeLis.length) throw new Error('Volume links not found.')
-
-            const links = []
-
-            for (const vol of volumeLis) {
+            
+            const volumes = []
+            
+            for (let volIdx = 0; volIdx < volumeLis.length; volIdx++) {
+                const vol = volumeLis[volIdx]
                 const chapLis = await vol.$$('ul > li')
                 const volBtn = await vol.$('button')
+                
                 if (volBtn) {
                     try {
                         await volBtn.click()
@@ -104,7 +102,9 @@ export default (driver) => ({
                         log.debug('Could not click volume button', { error: e.message })
                     }
                 }
-
+                
+                const chapters = []
+                
                 for (const chap of chapLis) {
                     const chapBtn = await chap.$('button')
                     if (!chapBtn) continue
@@ -112,44 +112,52 @@ export default (driver) => ({
                     try {
                         await chapBtn.click()
                         await driver.page.waitForTimeout(800)
-
                         const langLis = await chap.$$('ul > li')
                         if (langLis.length === 0) continue
-
+                        
                         const chosen = langLis[lang_idx] || langLis[0]
                         const anchor = await chosen.$('a')
                         
                         if (anchor) {
                             const href = await anchor.getAttribute('href') || ''
                             const absolute = href.startsWith('http') ? href : ENDPOINT_URL + href
-                            links.push(Url.fromString(absolute))
+                            chapters.push(Url.fromString(absolute))
                         }
                     } catch (e) {
                         log.debug('Error processing chapter', { error: e.message })
                     }
                 }
+                
+                if (chapters.length > 0) {
+                    // Remove duplicates
+                    const uniqueChapters = [...new Map(chapters.map(link => 
+                        [link.render(), link]
+                    )).values()]
+                    
+                    volumes.push({
+                        volume: volIdx + 1,
+                        chapters: uniqueChapters
+                    })
+                }
             }
-
-            // Remove duplicates
-            const uniqueLinks = [...new Map(links.map(link => 
-                [link.render(), link]
-            )).values()]
-
-            const validLinks = uniqueLinks.filter(l => l)
             
-            if (validLinks.length === 0) {
+            const totalChapters = volumes.reduce((sum, v) => sum + v.chapters.length, 0)
+            
+            if (totalChapters === 0) {
                 log.warn('No chapter links found')
             } else {
-                log.success('Retrieved chapter links', { count: validLinks.length })
+                log.success('Retrieved volumes and chapters', { 
+                    volumes: volumes.length,
+                    totalChapters 
+                })
             }
-
-            return validLinks
+            
+            return volumes
         } catch (error) {
             log.error('Failed to get all chapter links', error)
             return []
         }
     },
-
     getChapterLink: async () => {
         return driver.page.url()
     },

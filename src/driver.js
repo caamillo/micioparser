@@ -4,14 +4,14 @@ import log from "./log.js"
 import mangaworld from "./connector/mangaworld.js"
 import mangadex from "./connector/mangadex.js"
 
-const Browsers = {
+export const Browsers = {
     chromium: {
         driver: chromium,
         deviceDisplayName: 'chrome'
     }
 }
 
-const Connectors = {
+export const Connectors = {
     mangaworld,
     mangadex
 }
