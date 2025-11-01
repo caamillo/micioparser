@@ -94,17 +94,15 @@ class Driver {
     async exec(fn) {
         try {
             if (!this.isValid()) throw new Error("Driver is not valid.")
-    
-            const result = await fn(this.getDriverApis())
-            switch (this.opt.context_usage) {
-                case 'same-context':
-                    break
-                case 'multi-context':
-                    await this.build()
-                    break
+
+            if (this.opt.context_usage === 'multi-context') {
+                log.debug('Rebuilding context for multi-context mode', { 
+                    connector: this.connector_id 
+                })
+                await this.build()
             }
 
-            return result
+            return await fn(this.getDriverApis())
         } catch (err) {
             log.error('Execute error', err)
             throw err

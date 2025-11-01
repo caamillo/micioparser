@@ -734,9 +734,9 @@ export class ScrapingExecution {
     constructor(opt={}) {
         opt = {
             proxy: new ProxyPool(),
-            context_usage: 'multi-context',
+            context_usage: 'single-context',
             outputPath: 'downloads/$title/$vol/$chap/$page.png',
-            concurrency: 3,
+            concurrency: 2,
             rateLimit: 'auto',
             testIfMissing: true, // Auto rate-limit test if config not found
             maxConfigAge: 30, // Days before config is considered stale
@@ -990,7 +990,18 @@ export class ScrapingExecution {
      * @returns {Promise<Object|Array>} Search results
      */
     async search(title, connector=null, options={}) {
-        const { sequential = true, browser = 'chromium' } = options
+        const {
+            sequential = true, browser = 'chromium',
+            onProgress = null, signal = null
+         } = options
+
+        const checkAbort = () => {
+            if (signal?.aborted) {
+                const e = new Error('Search aborted')
+                e.name = 'AbortError'
+                throw e
+            }
+        }
         
         // 1: Search on all connectors
         if (connector === '*') {
@@ -1033,18 +1044,23 @@ export class ScrapingExecution {
             if (sequential) {
                 // Sequential execution - one at a time
                 for (const connectorId of availableConnectors) {
+                    checkAbort()
                     try {
                         const connectorResults = await this.lockConnector(
                             connectorId,
                             async (driver) => await driver.search(title)
                         )
-                        
-                        results.push({
+
+                        const payload = {
                             connector: connectorId,
                             success: true,
                             results: connectorResults,
                             count: connectorResults?.length || 0
-                        })
+                        }
+
+                        if (typeof onProgress === 'function') onProgress(payload)
+                        
+                        results.push(payload)
                         
                         log.success('Connector search completed', {
                             connector: connectorId,
@@ -1054,18 +1070,22 @@ export class ScrapingExecution {
                         log.error('Connector search failed', error, { 
                             connector: connectorId 
                         })
-                        
-                        results.push({
+
+                        const payload = {
                             connector: connectorId,
                             success: false,
                             error: error.message,
                             results: []
-                        })
+                        }
+                        
+                        if (typeof onProgress === 'function') onProgress(payload)
+                        results.push(payload)
                     }
                 }
             } else {
                 // Parallel execution - all at once
                 const searchPromises = availableConnectors.map(async (connectorId) => {
+                    checkAbort()
                     try {
                         const connectorResults = await this.lockConnector(
                             connectorId,
@@ -1076,24 +1096,30 @@ export class ScrapingExecution {
                             connector: connectorId,
                             resultsCount: connectorResults?.length || 0
                         })
-                        
-                        return {
+
+                        const payload = {
                             connector: connectorId,
                             success: true,
                             results: connectorResults,
                             count: connectorResults?.length || 0
                         }
+
+                        if (typeof onProgress === 'function') onProgress(payload)
+                        return payload
                     } catch (error) {
                         log.error('Connector search failed', error, { 
                             connector: connectorId 
                         })
-                        
-                        return {
+
+                        const payload = {
                             connector: connectorId,
                             success: false,
                             error: error.message,
                             results: []
                         }
+                        
+                        if (typeof onProgress === 'function') onProgress(payload)
+                        return payload
                     }
                 })
                 
@@ -1117,6 +1143,7 @@ export class ScrapingExecution {
         
         // 2: Search on specific connector
         if (connector && typeof connector === 'string') {
+            checkAbort()
             if (!(connector in Connectors)) {
                 throw new Error(`Unknown connector: ${connector}`)
             }
@@ -1163,13 +1190,16 @@ export class ScrapingExecution {
                 connector,
                 resultsCount: results?.length || 0
             })
-            
-            return {
+
+            const payload = {
                 connector,
                 success: true,
                 results,
                 count: results?.length || 0
             }
+
+            if (typeof onProgress === 'function') onProgress(payload)
+            return payload
         }
         
         // 3: Progressive search (round-robin through available connectors)
@@ -1180,6 +1210,7 @@ export class ScrapingExecution {
         log.info('Starting progressive search', { title })
         
         // Use standard lock which rotates through all drivers
+        checkAbort()
         const results = await this.lock(
             async (driver) => await driver.search(title)
         )
@@ -1193,13 +1224,16 @@ export class ScrapingExecution {
             connector: usedDriver?.connector_id,
             resultsCount: results?.length || 0
         })
-        
-        return {
+
+        const payload = {
             connector: usedDriver?.connector_id,
             success: true,
             results,
             count: results?.length || 0
         }
+
+        if (typeof onProgress === 'function') onProgress(payload)
+        return payload
     }
 
     async lock(fn) {

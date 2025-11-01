@@ -1,7 +1,7 @@
 {
   "drivers": {
     "mangaworld": {
-      "reqsPerSecond": 75,
+      "reqsPerSecond": 5,
       "lastSuccessfulRate": 90,
       "avgResponseTime": "410",
       "totalRequests": 125,
