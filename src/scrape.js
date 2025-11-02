@@ -979,7 +979,7 @@ export class ScrapingExecution {
     }
 
     /**
-     * Search for a title across manga sources
+     * Search for a title across single or multiple sources
      * @param {string} title - The title to search for
      * @param {string|null} connector - could be:
      *   - null: Progressive search (rotates through all connectors)
