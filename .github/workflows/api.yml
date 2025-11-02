@@ -15,18 +15,18 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
     
-    - name: Setup Bun
+    - name: Bun setup
       uses: oven-sh/setup-bun@v1
       with:
         bun-version: latest
     
-    - name: Install dependencies
+    - name: Installing deps
       run: bun install --frozen-lockfile
     
-    - name: Install Playwright browsers (for scraping)
+    - name: Install Playwright browsers
       run: bunx playwright install --with-deps chromium
     
-    - name: Start ElysiaJS server
+    - name: Start API server
       run: |
         bun run api/app.js &
         echo $! > server.pid
