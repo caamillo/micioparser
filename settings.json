@@ -12,7 +12,7 @@
       "testDuration": "53.81"
     },
     "mangadex": {
-      "reqsPerSecond": 48,
+      "reqsPerSecond": 5,
       "lastSuccessfulRate": 60,
       "avgResponseTime": "79",
       "totalRequests": 307,

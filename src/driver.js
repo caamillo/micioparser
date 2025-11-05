@@ -1,8 +1,10 @@
 import { chromium, devices } from "playwright"
+import { Url } from "./utils.js"
 import log from "./log.js"
 
 import mangaworld from "./connector/mangaworld.js"
 import mangadex from "./connector/mangadex.js"
+import animeclick from "./connector/animeclick.js"
 
 export const Browsers = {
     chromium: {
@@ -13,13 +15,21 @@ export const Browsers = {
 
 export const Connectors = {
     mangaworld,
-    mangadex
+    mangadex,
+    // animeclick
 }
 
 const buildConnector = (browser, ctx, page, connector) => ({
     ...connector(driverApis(page, connector)),
     browser,
     ctx
+})
+
+const driverApis = (page, connector) => ({
+    page,
+    Url,
+    log,
+    name: connector.name,
 })
 
 export const build = async (connector_id) => {
@@ -49,13 +59,15 @@ export const buildMany = async (connector_id, count = 3) => {
 }
 
 class Driver {
-    constructor(connector_id='mangaworld', browser='chromium', opt={}) {
+    constructor(connector_id, browserName, opt = {}) {
         this.connector_id = connector_id
-        this.selectedBrowser = Browsers[browser]
-        this.conn = Connectors[this.connector_id]
+        this.browserName = browserName
+        this.opt = opt
         this.browser = null
-        this.context = null
-        this.opt = { ...opt }
+        this.ctx = null
+        this.page = null
+        this.name = Connectors[connector_id]?.name || 'unknown'
+        this.connector = null
     }
 
     isValid() {
@@ -64,30 +76,51 @@ class Driver {
     }
 
     async build() {
-        try {
-            if (!this.isValid()) throw new Error("Driver is not valid.")
+        const browserType = Browsers[this.browserName].driver
+        const proxy = this.opt.proxy
 
-            if (this.context?.ctx) {
-                await this.context.ctx.close()
-            }
+        this.browser = await browserType.launch({
+        })
+        
+        const contextOptions = {
+            ...devices['chrome'],
+            bypassCSP: true,
+            ...(proxy && proxy.isValid() ? {
+                proxy: {
+                    server: `http://${proxy.server}`,
+                    username: proxy.user,
+                    password: proxy.pass,
+                }
+            } : {})
+        }
 
-            if (this.browser && this.opt.context_usage === 'multi-context') {
-                await this.browser.close()
-            }
+        this.ctx = await this.browser.newContext(contextOptions)
+        this.page = await this.ctx.newPage()
 
-            if (!this.browser || this.opt.context_usage === 'multi-context') {
-                this.browser = await this.selectedBrowser.driver.launch()
-            }
+        const connectorFn = Connectors[this.connector_id]
+        if (!connectorFn) throw new Error(`Connector '${this.connector_id}' not found.`)
 
-            const ctx = await this.browser.newContext({ 
-                ...devices[this.selectedBrowser.deviceDisplayName], 
-                proxy: this.opt.proxy.getProxy() 
-            })
+        this.connector = {
+            ...connectorFn(driverApis(this.page, connectorFn)),
+            browser: this.browser,
+            ctx: this.ctx
+        }
 
-            this.context = { ctx, pages: [ await ctx.newPage() ], idx: 0 }
+        log.debug('Driver built', { connector: this.name, proxy: proxy?.server || 'none' })
+    }
 
-        } catch (err) {
-            log.error('Build error', err)
+    getConnector() {
+        return this.connector
+    }
+
+    async close() {
+        if (this.browser) {
+            await this.browser.close()
+            this.browser = null
+            this.ctx = null
+            this.page = null
+            this.connector = null
+            log.debug('Driver closed', { connector: this.name })
         }
     }
 
@@ -146,21 +179,20 @@ class Driver {
             ...api,
             ...driver,
             
-            search: async (title) => {
-                log.info('Starting manga search', { title, source: driver.name, browser: self.selectedBrowser.deviceDisplayName })
+            // FIXED: Add options parameter for progress callbacks
+            search: async (title, searchOptions = {}) => {
+                const { onItemProgress } = searchOptions
+                
+                log.info('Starting manga search', { 
+                    title, 
+                    source: driver.name, 
+                    browser: self.selectedBrowser.deviceDisplayName 
+                })
                 
                 let url = driver.getSearchUrl(title)
                 await driver.page.goto(url.render(), { 
                     waitUntil: 'networkidle',
-                    timeout: 30000 
-                })
-                
-                // Wait for content to load
-                await driver.page.waitForTimeout(2000)
-                
-                await driver.page.screenshot({
-                    path: 'out.png',
-                    fullPage: true
+                    timeout: 30e3
                 })
 
                 log.debug('Navigated to search page', { url: url.render() })
@@ -171,7 +203,11 @@ class Driver {
                 const results = []
                 
                 for (let i = 0; i < pages; i++) {
-                    log.debug('Fetching search page', { page: i, totalPages: pages, url: url.render() })
+                    log.debug('Fetching search page', { 
+                        page: i, 
+                        totalPages: pages, 
+                        url: url.render() 
+                    })
                     
                     const entries = await driver.getSearchResults()
                     
@@ -180,35 +216,70 @@ class Driver {
                         continue
                     }
                     
-                    log.debug('Found entries on page', { page: i, entriesCount: entries.length })
+                    log.debug('Found entries on page', { 
+                        page: i, 
+                        entriesCount: entries.length 
+                    })
                     
-                    const pageResults = await Promise.all(
-                        entries.map(async entry => {
-                            try {
-                                const entryData = {}
-                                for (const key of driver.opt.global_search_keys) {
-                                    entryData[key] = await driver.getSearchEntry(key, entry)
-                                }
-                                return entryData
-                            } catch (error) {
-                                log.error('Failed to parse entry', error, { page: i + 1 })
-                                return null
+                    // FIRST: Extract all the links from the current page
+                    const entryLinks = []
+                    for (let j = 0; j < entries.length; j++) {
+                        try {
+                            const link = await driver.getSearchEntryLink(entries[j])
+                            entryLinks.push(Url.fromString(link))
+                        } catch (error) {
+                            log.error('Failed to get entry link', error, { index: j + 1 })
+                            entryLinks.push(null)
+                        }
+                    }
+                    
+                    // SECOND: Navigate to each link and fetch data
+                    for (let j = 0; j < entryLinks.length; j++) {
+                        const link = entryLinks[j]
+                        if (!link) {
+                            continue
+                        }
+                        
+                        try {
+                            log.info('Fetching book: ' + (j + 1), { url: link.render() })
+                            await driver.page.goto(link.render(), { 
+                                waitUntil: 'networkidle',
+                                timeout: 60e3
+                            })
+                            await driver.page.waitForTimeout(2e3)
+
+                            const entryData = { link }
+                            for (const key of driver.opt.global_search_keys) {
+                                entryData[key] = await driver.getEntryField(key)
                             }
-                        })
-                    )
-                    
-                    const validResults = pageResults.filter(r => r !== null)
-                    results.push(...validResults)
+                            
+                            results.push(entryData)
+                            
+                            // FIXED: Send item immediately via progress callback
+                            if (typeof onItemProgress === 'function') {
+                                onItemProgress(entryData)
+                            }
+                            
+                        } catch (error) {
+                            log.error('Failed to parse entry', error, { page: j + 1 })
+                        }
+                    }
                     
                     log.success('Processed search page', { 
                         page: i + 1, 
                         totalPages: pages,
-                        resultsOnPage: validResults.length,
+                        resultsOnPage: entryLinks.filter(l => l !== null).length,
                         totalResults: results.length 
                     })
 
-                    url.incArg('page')
-                    await driver.page.goto(url.render())
+                    // Navigate to next search page if there are more pages
+                    if (i < pages - 1) {
+                        url.incArg('page')
+                        await driver.page.goto(url.render(), {
+                            waitUntil: 'networkidle',
+                            timeout: 30e3
+                        })
+                    }
                 }
                 
                 log.success('Search completed', { 
@@ -218,7 +289,7 @@ class Driver {
                 })
                 
                 return results
-            },
+            }
         }
     }
 }
@@ -226,6 +297,7 @@ class Driver {
 export class DriverPool {
     constructor(opt={}) {
         this.pool = []
+        this.busy = new Set()
         this.idx = 0
         this.opt = { ...opt }
     }
@@ -245,37 +317,79 @@ export class DriverPool {
         this.idx = (this.idx + 1) % this.pool.length
         return driver
     }
+
+    getAvailableDriver() {
+        if (!this.pool.length) return null
+
+        for (let i = 0; i < this.pool.length; i++) {
+            const driver = this.pool[(this.idx + i) % this.pool.length]
+            if (!this.busy.has(driver)) {
+                // Advance the index only on successful acquisition for round-robin fairness
+                this.idx = (this.idx + i + 1) % this.pool.length
+                return driver
+            }
+        }
+        return null // All drivers are busy
+    }
     
-    async addDriver(connector_id, browser, opt={}) {
-        const driver = new Driver(connector_id, browser, { ...this.opt, ...opt })
+    async addDriver(connector_id, browserName, proxy, opt={}) { 
+        const driver = new Driver(connector_id, browserName, { 
+            ...this.opt, 
+            ...opt, 
+            proxy
+        }) 
         await driver.build()
         this.pool.push(driver)
     }
 
-    static async withDriver(connector_id, browser, opt={}) {
+
+    static async withDriver(connector_id, browser, proxy, opt={}) { // Updated signature
         const self = new DriverPool()
-        await self.addDriver(connector_id, browser, opt)
+        await self.addDriver(connector_id, browser, proxy, opt)
         return self
     }
 
-    static async withDrivers(drivers) {
+    static async withDrivers(drivers) { 
         const self = new DriverPool()
-        await Promise.all(drivers.map(async driver => await self.addDriver(...driver)))
+        await Promise.all(drivers.map(async ([connector_id, browserName, proxy]) => 
+            await self.addDriver(connector_id, browserName, proxy)
+        ))
         return self
     }
     
     async exec(fn) {
-        try {
-            if (!this.isValid()) throw new Error("DriverPool is not valid.")
-
-            const driver = this.getDriver()
-            if (!driver || !driver.isValid()) throw new Error([ "Driver is not valid", driver ])
-    
-            const result = await driver.exec(fn)
-            return result
-        } catch (err) {
-            log.error('Execute error', err)
-            throw err
+        if (!this.isValid()) {
+            throw new Error("DriverPool is not valid (no drivers built).")
         }
+
+        let driver = this.getAvailableDriver()
+        
+        // FIX: Add timeout to prevent infinite waiting
+        const maxWaitTime = 60000 // 60 seconds
+        const startTime = Date.now()
+        
+        while (!driver) {
+            if (Date.now() - startTime > maxWaitTime) {
+                throw new Error("Timeout waiting for available driver. All drivers are busy.")
+            }
+            
+            await new Promise(resolve => setTimeout(resolve, 100))
+            driver = this.getAvailableDriver()
+        }
+
+        this.busy.add(driver) 
+        
+        try {
+            return await fn(driver.getConnector()) 
+        } finally {
+            this.busy.delete(driver) 
+        }
+    }
+
+    async dispose() {
+        await Promise.all(this.pool.map(driver => driver.close()))
+        this.pool = []
+        this.busy.clear()
+        this.idx = 0
     }
 }

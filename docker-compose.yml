@@ -15,11 +15,13 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
+      - DEBUG=true
     restart: unless-stopped
     security_opt:
       - seccomp:unconfined
     shm_size: '2gb'
     deploy:
+      replicas: 1
       resources:
         limits:
           cpus: '2'

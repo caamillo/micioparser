@@ -1,12 +1,13 @@
-import { childText, childrenText, childAttribute, Url } from "../utils.js"
+import { childText, childrenText, childAttribute, childrenAt, Url, CommonModifiers } from "../utils.js"
 import log from "../log.js"
 
+const name = 'mangadex'
 const ENDPOINT_URL = 'https://mangadex.org'
 const CDN_ENDPOINT_URL = 'https://mangadex.org'
 
 export default (driver) => ({
     ...driver,
-    name: 'mangadex',
+    name,
 
     getPages: async() => {
         const anchorsText = await childrenText(driver.page, '.flex.justify-center.flex-wrap.gap-2.mt-6 > a')
@@ -23,22 +24,81 @@ export default (driver) => ({
         return entries
     },
 
-    getSearchEntry: async(key, entry) => {
+    getSearchEntryLink: async (entry) => {
+        const link = await childAttribute(entry, 'a.title', 'href')
+        return link.startsWith('http') ? link : (ENDPOINT_URL + link)
+    },
+
+    getEntryField: async (key) => {
+        const entry = driver.page
+        const side_info = await driver.page.$('.flex.gap-6.items-start > .flex.flex-wrap.gap-x-4.gap-y-2.flex')
+
         const keys = {
-            link: async () => {
-                const link = await childAttribute(entry, 'a.title', 'href')
-                return link.startsWith('http') ? link : (ENDPOINT_URL + link)
+            banner: async () => {
+                const half_size_el = await entry.$('.layout-container .group.flex.items-start.relative.mb-auto.select-none img')
+                await half_size_el.click()
+                const full_size_el = await entry.$('img.max-w-full.max-h-full')
+
+                const [ full_size, half_size ] = [
+                    full_size_el,
+                    half_size_el
+                ].map(async (el) => await el.getAttribute('src'))
+
+                return { full_size, half_size }
             },
-            banner: async () => await childAttribute(entry, 'img.rounded.shadow-md.w-full.h-auto', 'src'),
-            title: async () => await childText(entry, 'a.title'),
-            genres: async () => await childrenText(entry, '.flex.flex-wrap.gap-1.tags-row.tags.self-start > *'),
-            short_plot: async () => await childText(entry, '.md-md-container.dense')
+            title: async () => await childText(entry, '.title > p'),
+            alternative_titles: async () => {
+                const divs = await side_info.$$(':scope > div')
+                if (!divs[9]) return
+                
+                const links = await divs[9].$$('.flex > a')
+                const texts = await Promise.all(links.map(async link => await link.textContent()))
+                return texts
+            },
+            genres: async () => {
+                const allGenres = []
+                const divs = await side_info.$$(':scope > div')
+                for (const idx of [2, 3, 4]) {
+                    if (!divs[idx]) continue
+                    const links = await divs[idx].$$('.flex > a')
+                    const texts = await Promise.all(links.map(async link => await link.textContent()))
+                    allGenres.push(...texts)
+                }
+                return allGenres
+            },
+            author: async () => {
+                const divs = await side_info.$$(':scope > div')
+                if (!divs[0]) return
+
+                const links = await divs[0].$$('.flex > a')
+                if (!links[0]) return
+
+                return await links[0].textContent()
+            },
+            artist: async () => {
+                const divs = await side_info.$$(':scope > div')
+                if (!divs[1]) return
+
+                const links = await divs[1].$$('.flex > a')
+                if (!links[0]) return
+
+                return await links[0].textContent()
+            },
+            type: async () => 'Manga',
+            status: async () => (await childText(entry, '.tag.dot.no-wrapper'))?.split(', ')?.[1],
+            year: async () => (await childText(entry, '.tag.dot.no-wrapper'))?.split(', ')?.[0]?.split(':')?.[1],
+            plot: async () => await childText(entry, '.md-md-container > p')
         }
 
         const getEntry = keys?.[key]
         if (!getEntry) return
 
-        return await getEntry()
+        try {
+            log.debug('getting key', { key, name })
+            return await getEntry()
+        } catch (err) {
+            log.error(`Can't access ${ key } for connector ${ name }`, err, { key, name })
+        }
     },
 
     getSearchUrl(title) {

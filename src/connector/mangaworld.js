@@ -1,12 +1,13 @@
-import { childText, childrenText, childAttribute, Url } from "../utils.js"
+import { childText, childrenText, childAttribute, childrenAt, Url, CommonModifiers } from "../utils.js"
 import log from "../log.js"
 
+const name = 'mangaworld'
 const ENDPOINT_URL = 'https://mangaworld.cx'
 const CDN_ENDPOINT_URL = 'https://cdn.mangaworld.cx'
 
 export default (driver) => ({
     ...driver,
-    name: 'mangaworld',
+    name,
 
     getPages: async() => {
         let pages = await driver.page.$('.page-item.last > a.page-link')
@@ -22,24 +23,52 @@ export default (driver) => ({
         return entries
     },
 
-    getSearchEntry: async(key, entry) => {
+    getSearchEntryLink: async (entry) =>
+        await childAttribute(entry, 'a.thumb', 'href'),
+
+    getEntryField: async (key) => {
+        const entry = await driver.page.$('.comic-info')
+
+        const getFieldText = async (idx) => {
+            const divs = await entry.$$('.meta-data > .col-12')
+            if (!divs[idx]) return
+
+            const el = await divs[idx].$(':nth-child(2)')
+            if (!el) return
+
+            return await el.textContent()
+        }
+
         const keys = {
-            link: async () => await childAttribute(entry, 'a.thumb', 'href'),
-            banner: async () => await childAttribute(entry, 'a.thumb > img', 'src'),
-            title: async () => await childText(entry, '.manga-title'),
-            type: async () => await childText(entry, '.genre > a'),
-            author: async () => await childText(entry, '.author > a'),
-            artist: async () => await childText(entry, '.artist > a'),
-            genres: async () => await childrenText(entry, '.genres > a'),
-            short_plot: async () => await entry.$eval('.story', el => {
+            banner: async () => ({ full_size: await childAttribute(entry, 'div > img', 'src') }),
+            title: async () => await childText(entry, '.name'),
+            alternative_titles: async () => await entry.$eval('.meta-data > .col-12', el => {
                 const clone = el.cloneNode(true)
                 clone.querySelector('span').remove()
-                return clone.textContent.trim()
-            })
+                return clone.textContent.trim().split(', ')
+            }),
+            genres: async () => await childrenText(entry, '.badge'),
+            author: async () => await getFieldText(2),
+            artist: async () => await getFieldText(3),
+            type: async () => await getFieldText(4),
+            status: async () => await getFieldText(5),
+            views: async () => await getFieldText(6),
+            year: async () => await getFieldText(7),
+            n_volumes: async () => await getFieldText(8),
+            n_chaps: async () => await getFieldText(9),
+            plot: async () => await childText('.comic-description > div[id]', driver.page)
         }
+
         const getEntry = keys?.[key]
         if (!getEntry) return
-        return await getEntry()
+
+        try {
+            log.debug('getting key', { key })
+            return await getEntry()
+        } catch (err) {
+            await driver.page.screenshot({ path: 'downloads/out.png', fullPage: true })
+            log.error(`Can't access ${ key } for connector ${ name }`, err, { key, name })
+        }
     },
 
     getSearchUrl(title) {

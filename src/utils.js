@@ -4,9 +4,32 @@ export const childText = async (el, query) =>
 export const childAttribute = async (el, query, attr) =>
     await (await el.$(query)).getAttribute(attr)
 
+export const childAt = async (el, query, at, modifier=CommonModifiers.default, multiple=false) => {
+    el = await el.$(query)
+
+    if (!multiple) el = await el.$(at)
+    else el = await el.$$(at)
+
+    return await modifier(el)
+}
+
 export const childrenText = async (el, query) => Promise.all(
     (await el.$$(query)).map(async child => await child.textContent())
 )
+
+export const childrenAt = async (el, query, at, modifier=CommonModifiers.default, multiple=false) => {
+    let els = await el.$$(query)
+
+    if (!multiple) els = await Promise.all(els.map(async el => el?.$(at)))
+    else els = await Promise.all(els.map(async el => el?.$$(at)))
+
+    return await modifier(els)
+}
+
+export const CommonModifiers = {
+    default: async (el) => el,
+    textContent: async (el) => await el?.textContent()
+}
 
 const IndexPool = '0123456789abcdef'.split('')
 
