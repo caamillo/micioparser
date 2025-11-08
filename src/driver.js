@@ -1,10 +1,10 @@
 import { chromium, devices } from "playwright"
 import { Url } from "./utils.js"
 import log from "./log.js"
+import { ContextMode } from "./navigation.js"
 
 import mangaworld from "./connector/mangaworld.js"
 import mangadex from "./connector/mangadex.js"
-import animeclick from "./connector/animeclick.js"
 
 export const Browsers = {
     chromium: {
@@ -16,14 +16,7 @@ export const Browsers = {
 export const Connectors = {
     mangaworld,
     mangadex,
-    // animeclick
 }
-
-const buildConnector = (browser, ctx, page, connector) => ({
-    ...connector(driverApis(page, connector)),
-    browser,
-    ctx
-})
 
 const driverApis = (page, connector) => ({
     page,
@@ -32,33 +25,10 @@ const driverApis = (page, connector) => ({
     name: connector.name,
 })
 
-export const build = async (connector_id) => {
-    const browser = await chromium.launch()
-    const ctx = await browser.newContext(devices['chrome'])
-    const page = await ctx.newPage()
-
-    const connector = Connectors[connector_id]
-    if (!connector) throw "Connector not found."
-
-    return buildConnector(browser, ctx, page, connector)
-}
-
-export const buildMany = async (connector_id, count = 3) => {
-    const browser = await chromium.launch()
-    const connector = Connectors[connector_id]
-    if (!connector) throw "Connector not found."
-
-    const drivers = []
-    for (let i = 0; i < count; i++) {
-        const ctx = await browser.newContext(devices['chrome'])
-        const page = await ctx.newPage()
-        drivers.push(buildConnector(browser, ctx, page, connector))
-    }
-
-    return { browser, drivers }
-}
-
-class Driver {
+/**
+ * Manages a single browser instance with connector
+ */
+export class Driver {
     constructor(connector_id, browserName, opt = {}) {
         this.connector_id = connector_id
         this.browserName = browserName
@@ -68,20 +38,31 @@ class Driver {
         this.page = null
         this.name = Connectors[connector_id]?.name || 'unknown'
         this.connector = null
+        this.contextMode = opt.contextMode || ContextMode.SINGLE
     }
 
     isValid() {
-        if (this.conn) return true
-        return false
+        return !!this.connector && !!this.browser
     }
 
-    async build() {
-        const browserType = Browsers[this.browserName].driver
-        const proxy = this.opt.proxy
+    /**
+     * Rebuilds context with new proxy, if available
+     */
+    async build(proxy = this.opt.proxy) {
+        if (this.contextMode === ContextMode.SINGLE && !!this.browser) {
+            log.warn('Attempting to recreate context in single-context mode with browser already builded.')
+            return
+        } else if (this.contextMode === ContextMode.SINGLE) {
+            const browserType = Browsers[this.browserName].driver
+            this.browser = await browserType.launch()
+        }
 
-        this.browser = await browserType.launch({
-        })
-        
+        // Close current context
+        if (this.ctx) {
+            await this.ctx.close()
+        }
+
+        // Create new context with new proxy
         const contextOptions = {
             ...devices['chrome'],
             bypassCSP: true,
@@ -97,16 +78,18 @@ class Driver {
         this.ctx = await this.browser.newContext(contextOptions)
         this.page = await this.ctx.newPage()
 
+        // Update connector reference to new page
         const connectorFn = Connectors[this.connector_id]
-        if (!connectorFn) throw new Error(`Connector '${this.connector_id}' not found.`)
-
         this.connector = {
             ...connectorFn(driverApis(this.page, connectorFn)),
             browser: this.browser,
             ctx: this.ctx
         }
 
-        log.debug('Driver built', { connector: this.name, proxy: proxy?.server || 'none' })
+        log.debug('Context recreated', { 
+            connector: this.name,
+            proxy: proxy?.server || 'none'
+        })
     }
 
     getConnector() {
@@ -114,282 +97,165 @@ class Driver {
     }
 
     async close() {
+        if (this.ctx) {
+            await this.ctx.close()
+            this.ctx = null
+            this.page = null
+        }
+        
         if (this.browser) {
             await this.browser.close()
             this.browser = null
-            this.ctx = null
-            this.page = null
             this.connector = null
             log.debug('Driver closed', { connector: this.name })
         }
     }
+}
 
-    async exec(fn) {
+/**
+ * Manages multiple drivers (one per connector)
+ */
+export class DriverPool {
+    constructor(opt = {}) {
+        this.drivers = new Map() // connector_id -> Driver
+        this.opt = { ...opt }
+        this.contextMode = opt.contextMode || ContextMode.SINGLE
+    }
+
+    /**
+     * Check if pool has any drivers
+     */
+    isValid() {
+        return this.drivers.size > 0
+    }
+
+    /**
+     * Get driver for connector
+     */
+    getDriver(connectorId) {
+        return this.drivers.get(connectorId)
+    }
+
+    /**
+     * Check if driver exists for connector
+     */
+    hasDriver(connectorId) {
+        return this.drivers.has(connectorId)
+    }
+
+    /**
+     * Add driver to pool
+     */
+    async addDriver(connector_id, browserName, proxy = null, opt = {}) {
+        if (this.drivers.has(connector_id)) {
+            log.warn('Driver already exists for connector', { connector: connector_id })
+            return
+        }
+
+        const driver = new Driver(connector_id, browserName, {
+            ...this.opt,
+            ...opt,
+            proxy,
+            contextMode: this.contextMode
+        })
+
+        await driver.build()
+        this.drivers.set(connector_id, driver)
+
+        log.debug('Driver added to pool', {
+            connector: driver.name,
+            poolSize: this.drivers.size
+        })
+    }
+
+    /**
+     * Execute function with specific connector's driver
+     */
+    async exec(connectorId, fn) {
+        const driver = this.getDriver(connectorId)
+        
+        if (!driver || !driver.isValid()) {
+            throw new Error(`Driver not found or invalid: ${connectorId}`)
+        }
+
         try {
-            if (!this.isValid()) throw new Error("Driver is not valid.")
-
-            if (this.opt.context_usage === 'multi-context') {
-                log.debug('Rebuilding context for multi-context mode', { 
-                    connector: this.connector_id 
-                })
-                await this.build()
-            }
-
-            return await fn(this.getDriverApis())
+            return await fn(driver.getConnector())
         } catch (err) {
-            log.error('Execute error', err)
+            log.error('Driver execution error', err, { connector: connectorId })
             throw err
         }
     }
 
-    async close() {
-        if (this.context?.ctx) {
-            await this.context.ctx.close()
+    /**
+     * Rebuilds context for driver
+     */
+    async build(connectorId, proxy = null) {
+        const driver = this.getDriver(connectorId)
+        
+        if (!driver) {
+            throw new Error(`Driver not found: ${connectorId}`)
         }
-        if (this.browser) {
-            await this.browser.close()
-        }
+
+        await driver.build(proxy)
     }
 
-    getDriverApis() {
-        if (!this.isValid() || !this.context) return
+    /**
+     * Get all connector IDs
+     */
+    getConnectorIds() {
+        return Array.from(this.drivers.keys())
+    }
 
-        const self = this
-        
-        const api = {
-            get page() {
-                return self.context.pages[self.context.idx]
-            },
-            opt: this.opt,
+    /**
+     * Dispose all drivers
+     */
+    async dispose() {
+        await Promise.all(
+            Array.from(this.drivers.values()).map(driver => driver.close())
+        )
+        this.drivers.clear()
+        log.info('Driver pool disposed')
+    }
 
-            goHome: async () => {
-                const currentPage = self.context.pages[self.context.idx]
-                await currentPage.goto(self.conn().ENDPOINT_URL)
-            },
-
-            go: async (book) => {
-                const currentPage = self.context.pages[self.context.idx]
-                await currentPage.goto(typeof book === 'object' ? book?.link : book)
-            },
-        }
-
-        const driver = this.conn(api)
+    /**
+     * Get pool status
+     */
+    getStatus() {
+        const drivers = {}
+        this.drivers.forEach((driver, connectorId) => {
+            drivers[connectorId] = {
+                name: driver.name,
+                valid: driver.isValid(),
+                contextMode: driver.contextMode
+            }
+        })
 
         return {
-            ...api,
-            ...driver,
-            
-            // FIXED: Add options parameter for progress callbacks
-            search: async (title, searchOptions = {}) => {
-                const { onItemProgress } = searchOptions
-                
-                log.info('Starting manga search', { 
-                    title, 
-                    source: driver.name, 
-                    browser: self.selectedBrowser.deviceDisplayName 
-                })
-                
-                let url = driver.getSearchUrl(title)
-                await driver.page.goto(url.render(), { 
-                    waitUntil: 'networkidle',
-                    timeout: 30e3
-                })
-
-                log.debug('Navigated to search page', { url: url.render() })
-                
-                const pages = (await driver.getPages()) ?? 1
-                log.info('Found search result pages', { totalPages: pages, title })
-                
-                const results = []
-                
-                for (let i = 0; i < pages; i++) {
-                    log.debug('Fetching search page', { 
-                        page: i, 
-                        totalPages: pages, 
-                        url: url.render() 
-                    })
-                    
-                    const entries = await driver.getSearchResults()
-                    
-                    if (!entries || !entries.length) {
-                        log.warn('No entries found on page', { page: i })
-                        continue
-                    }
-                    
-                    log.debug('Found entries on page', { 
-                        page: i, 
-                        entriesCount: entries.length 
-                    })
-                    
-                    // FIRST: Extract all the links from the current page
-                    const entryLinks = []
-                    for (let j = 0; j < entries.length; j++) {
-                        try {
-                            const link = await driver.getSearchEntryLink(entries[j])
-                            entryLinks.push(Url.fromString(link))
-                        } catch (error) {
-                            log.error('Failed to get entry link', error, { index: j + 1 })
-                            entryLinks.push(null)
-                        }
-                    }
-                    
-                    // SECOND: Navigate to each link and fetch data
-                    for (let j = 0; j < entryLinks.length; j++) {
-                        const link = entryLinks[j]
-                        if (!link) {
-                            continue
-                        }
-                        
-                        try {
-                            log.info('Fetching book: ' + (j + 1), { url: link.render() })
-                            await driver.page.goto(link.render(), { 
-                                waitUntil: 'networkidle',
-                                timeout: 60e3
-                            })
-                            await driver.page.waitForTimeout(2e3)
-
-                            const entryData = { link }
-                            for (const key of driver.opt.global_search_keys) {
-                                entryData[key] = await driver.getEntryField(key)
-                            }
-                            
-                            results.push(entryData)
-                            
-                            // FIXED: Send item immediately via progress callback
-                            if (typeof onItemProgress === 'function') {
-                                onItemProgress(entryData)
-                            }
-                            
-                        } catch (error) {
-                            log.error('Failed to parse entry', error, { page: j + 1 })
-                        }
-                    }
-                    
-                    log.success('Processed search page', { 
-                        page: i + 1, 
-                        totalPages: pages,
-                        resultsOnPage: entryLinks.filter(l => l !== null).length,
-                        totalResults: results.length 
-                    })
-
-                    // Navigate to next search page if there are more pages
-                    if (i < pages - 1) {
-                        url.incArg('page')
-                        await driver.page.goto(url.render(), {
-                            waitUntil: 'networkidle',
-                            timeout: 30e3
-                        })
-                    }
-                }
-                
-                log.success('Search completed', { 
-                    title, 
-                    totalResults: results.length,
-                    totalPages: pages 
-                })
-                
-                return results
-            }
+            size: this.drivers.size,
+            contextMode: this.contextMode,
+            drivers
         }
     }
-}
 
-export class DriverPool {
-    constructor(opt={}) {
-        this.pool = []
-        this.busy = new Set()
-        this.idx = 0
-        this.opt = { ...opt }
-    }
-
-    length() {
-        return this.pool.length
-    }
-
-    isValid() {
-        return this.pool.length
-    }
-
-    getDriver() {
-        if (!this.pool.length) return
-
-        const driver = this.pool[this.idx]
-        this.idx = (this.idx + 1) % this.pool.length
-        return driver
-    }
-
-    getAvailableDriver() {
-        if (!this.pool.length) return null
-
-        for (let i = 0; i < this.pool.length; i++) {
-            const driver = this.pool[(this.idx + i) % this.pool.length]
-            if (!this.busy.has(driver)) {
-                // Advance the index only on successful acquisition for round-robin fairness
-                this.idx = (this.idx + i + 1) % this.pool.length
-                return driver
-            }
-        }
-        return null // All drivers are busy
-    }
-    
-    async addDriver(connector_id, browserName, proxy, opt={}) { 
-        const driver = new Driver(connector_id, browserName, { 
-            ...this.opt, 
-            ...opt, 
-            proxy
-        }) 
-        await driver.build()
-        this.pool.push(driver)
-    }
-
-
-    static async withDriver(connector_id, browser, proxy, opt={}) { // Updated signature
-        const self = new DriverPool()
-        await self.addDriver(connector_id, browser, proxy, opt)
-        return self
-    }
-
-    static async withDrivers(drivers) { 
-        const self = new DriverPool()
-        await Promise.all(drivers.map(async ([connector_id, browserName, proxy]) => 
-            await self.addDriver(connector_id, browserName, proxy)
-        ))
-        return self
-    }
-    
-    async exec(fn) {
-        if (!this.isValid()) {
-            throw new Error("DriverPool is not valid (no drivers built).")
-        }
-
-        let driver = this.getAvailableDriver()
+    /**
+     * Create pool with specific connectors
+     */
+    static async withConnectors(connectorIds, options = {}) {
+        const pool = new DriverPool(options)
         
-        // FIX: Add timeout to prevent infinite waiting
-        const maxWaitTime = 60000 // 60 seconds
-        const startTime = Date.now()
-        
-        while (!driver) {
-            if (Date.now() - startTime > maxWaitTime) {
-                throw new Error("Timeout waiting for available driver. All drivers are busy.")
-            }
-            
-            await new Promise(resolve => setTimeout(resolve, 100))
-            driver = this.getAvailableDriver()
+        for (const connectorId of connectorIds) {
+            const proxy = options.proxyPool?.getProxy() || null
+            await pool.addDriver(connectorId, 'chromium', proxy, options)
         }
 
-        this.busy.add(driver) 
-        
-        try {
-            return await fn(driver.getConnector()) 
-        } finally {
-            this.busy.delete(driver) 
-        }
+        return pool
     }
 
-    async dispose() {
-        await Promise.all(this.pool.map(driver => driver.close()))
-        this.pool = []
-        this.busy.clear()
-        this.idx = 0
+    /**
+     * Create pool with all available connectors
+     */
+    static async withAllConnectors(options = {}) {
+        const connectorIds = Object.keys(Connectors)
+        return await DriverPool.withConnectors(connectorIds, options)
     }
 }
