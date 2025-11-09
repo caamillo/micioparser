@@ -49,20 +49,27 @@ export class Driver {
      * Rebuilds context with new proxy, if available
      */
     async build(proxy = this.opt.proxy) {
-        if (this.contextMode === ContextMode.SINGLE && !!this.browser) {
-            log.warn('Attempting to recreate context in single-context mode with browser already builded.')
-            return
-        } else if (this.contextMode === ContextMode.SINGLE) {
+        // Launch browser if not exists (both SINGLE and MULTI modes need it)
+        if (!this.browser) {
             const browserType = Browsers[this.browserName].driver
             this.browser = await browserType.launch()
+            log.debug('Browser launched', { 
+                connector: this.name,
+                contextMode: this.contextMode 
+            })
+        } else if (this.contextMode === ContextMode.SINGLE) {
+            // In SINGLE mode, warn if trying to rebuild with existing browser
+            log.warn('Attempting to recreate context in single-context mode with browser already built.')
+            return
         }
 
-        // Close current context
+        // Close current context (MULTI mode will do this repeatedly)
         if (this.ctx) {
             await this.ctx.close()
+            log.debug('Context closed', { connector: this.name })
         }
 
-        // Create new context with new proxy
+        // Create new context with proxy
         const contextOptions = {
             ...devices['chrome'],
             bypassCSP: true,
@@ -86,9 +93,10 @@ export class Driver {
             ctx: this.ctx
         }
 
-        log.debug('Context recreated', { 
+        log.debug('Context created', { 
             connector: this.name,
-            proxy: proxy?.server || 'none'
+            proxy: proxy?.server || 'none',
+            contextMode: this.contextMode
         })
     }
 

@@ -1,15 +1,15 @@
 import { Elysia, sse } from 'elysia'
 import { cors } from '@elysiajs/cors'
-import { ScrapingExecution } from "../src/scrape.js"
+import { Scraper } from "../src/scraper.js"
 import { ContextMode } from "../src/navigation.js"
 import log from '../src/log.js'
 
 const DEFAULT_OPTIONS = {
-    size: 2,
-    contextMode: null
+    concurrency: 5,
+    tasksPerWorker: 5,
 }
 
-let globalExecution = ScrapingExecution.withOptions(DEFAULT_OPTIONS)
+let globalExecution = Scraper.withOptions(DEFAULT_OPTIONS)
 
 function createAsyncQueue() {
     const buffer = []
@@ -93,9 +93,9 @@ const app = new Elysia()
         }
     })
 
-    .get('/setup/:size', async ({ params: { size }, query, set }) => {
-        const workerSize = parseInt(size)
-        if (isNaN(workerSize) || workerSize < 1) {
+    .get('/setup/:concurrency', async ({ params: { concurrency }, query, set }) => {
+        concurrency = parseInt(concurrency)
+        if (isNaN(concurrency) || concurrency < 1) {
             set.status = 400
             return {
                 success: false,
@@ -112,30 +112,30 @@ const app = new Elysia()
                 ? ContextMode.MULTI
                 : null
             log.info('Setting up execution system', { 
-                size: workerSize,
+                concurrency: concurrency,
                 connectors,
                 contextMode: contextMode || 'auto-detect'
             })
             if (globalExecution.isValid()) {
                 await globalExecution.dispose()
             }
-            globalExecution = ScrapingExecution.withOptions({
-                size: workerSize,
+            globalExecution = Scraper.withOptions({
+                concurrency: concurrency,
                 contextMode
             })
             const driverConfigs = connectors.map(conn => [conn, 'chromium', null])
             await globalExecution.withDrivers(driverConfigs)
             const status = globalExecution.getStatus()
             log.success('Execution system initialized', {
-                workers: status.workers.size,
+                workers: status.workers.concurrency,
                 drivers: status.drivers.size,
                 contextMode: status.options.contextMode
             })
             return {
                 success: true,
-                message: `Initialized with ${workerSize} workers`,
+                message: `Initialized with ${concurrency} workers`,
                 system: {
-                    workerSize,
+                    concurrency,
                     connectors,
                     contextMode: status.options.contextMode,
                     drivers: status.drivers,
@@ -155,6 +155,7 @@ const app = new Elysia()
     .get('/search/:title', async ({ params: { title }, query, set }) => {
         const { connector = '*', sequential = 'false', deep = 'true' } = query
         const queue = createAsyncQueue()
+
         if (!title) {
             queue.push({
                 event: 'error',
@@ -166,10 +167,12 @@ const app = new Elysia()
             queue.close()
             return sse(streamQueue(queue, 'search'))
         }
+
         const jobExecution = globalExecution.copy()
         jobExecution.opt.onItem = item => {
             queue.push(item)
         }
+
         ;(async () => {
             try {
                 log.info('Starting search', { title, connector })
@@ -185,19 +188,14 @@ const app = new Elysia()
                     (sum, r) => sum + (r.count || 0),
                     0
                 )
-                log.success('Search completed', {
-                    title,
-                    connectors: results.length,
-                    totalResults
-                })
-                queue.push({
-                    event: 'end',
-                    data: {
-                        success: true,
-                        totalResults,
-                        connectors: results.length
-                    }
-                })
+                // queue.push({
+                //     event: 'end',
+                //     data: {
+                //         success: true,
+                //         totalResults,
+                //         connectors: results.length
+                //     }
+                // })
             } catch (error) {
                 log.error('Search failed', error, { title })
                 queue.push({
@@ -271,12 +269,12 @@ const app = new Elysia()
     })
 
     .get('/process', async ({ query, set }) => {
-        const {
+        let {
             url,
             connector,
             title,
             mode = 'parallel',
-            size
+            concurrency
         } = query
         const queue = createAsyncQueue()
         if (!url) {
@@ -290,8 +288,8 @@ const app = new Elysia()
             queue.close()
             return sse(streamQueue(queue, 'process'))
         }
-        const workerSize = size ? parseInt(size) : null
-        if (workerSize && (isNaN(workerSize) || workerSize < 1)) {
+        concurrency = concurrency ? parseInt(concurrency) : null
+        if (concurrency && (isNaN(concurrency) || concurrency < 1)) {
             queue.push({
                 event: 'error',
                 data: {
@@ -302,10 +300,12 @@ const app = new Elysia()
             queue.close()
             return sse(streamQueue(queue, 'process'))
         }
+
         const jobExecution = globalExecution.copy()
         jobExecution.opt.onItem = item => {
             queue.push(item)
         }
+
         if (!globalExecution.isValid()) {
             const detectedConnector = connector || 'mangaworld'
             try {
@@ -322,17 +322,18 @@ const app = new Elysia()
                 return sse(streamQueue(queue, 'process'))
             }
         }
+
         ;(async () => {
             try {
                 log.info('Starting process', {
                     url,
                     mode,
-                    size: workerSize || globalExecution.opt.size
+                    concurrency: concurrency || globalExecution.opt.concurrency
                 })
                 const results = await jobExecution.process('default', mode, {
                     target: url,
                     title: title || 'unknown',
-                    size: workerSize
+                    concurrency: concurrency
                 })
                 log.success('Process completed', {
                     url,
@@ -409,25 +410,25 @@ const app = new Elysia()
         }
     })
 
-    .post('/config/size', async ({ query, set }) => {
-        const { size } = query
-        const workerSize = parseInt(size)
-        if (isNaN(workerSize) || workerSize < 1) {
+    .post('/config/concurrency', async ({ query, set }) => {
+        let { concurrency } = query
+        concurrency = parseInt(concurrency)
+        if (isNaN(concurrency) || concurrency < 1) {
             set.status = 400
             return {
                 success: false,
-                error: 'Invalid size. Must be a positive integer.'
+                error: 'Invalid concurrency. Must be a positive integer.'
             }
         }
         try {
-            globalExecution.setOption('size', workerSize)
-            log.info('Worker pool size changed', { size: workerSize })
+            globalExecution.setOption('size', concurrency)
+            log.info('Worker pool size changed', { concurrency })
             return {
                 success: true,
-                size: workerSize
+                concurrency
             }
         } catch (error) {
-            log.error('Failed to change worker pool size', error)
+            log.error('Failed to change worker pool concurrency', error)
             set.status = 500
             return {
                 success: false,
@@ -463,12 +464,12 @@ const app = new Elysia()
             endpoints: [
                 'GET /health',
                 'GET /status',
-                'GET /setup/:size?connectors=...&context=...',
+                'GET /setup/:concurrency?connectors=...&context=...',
                 'GET /search/:title?connector=...&deep=...',
                 'GET /book?url=...&connector=...',
-                'GET /process?url=...&mode=...&size=...',
+                'GET /process?url=...&mode=...&concurrency=...',
                 'POST /config/context?mode=...',
-                'POST /config/size?size=...',
+                'POST /config/concurrency?concurrency=...',
                 'POST /shutdown'
             ]
         })

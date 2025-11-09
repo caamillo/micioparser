@@ -6,7 +6,7 @@ import { NavigationLock, ContextMode } from "./navigation.js"
 import { WorkerPool, TaskFactory } from "./worker.js"
 import { getSettings } from "./settings.js"
 
-export class ScrapingExecution {
+export class Scraper {
     constructor(opt = {}) {
         this.drivers = null
         this.workerPool = null
@@ -14,7 +14,8 @@ export class ScrapingExecution {
         this.proxies = new ProxyPool()
         
         this.opt = {
-            size: opt.size || 1, // Worker pool size
+            concurrency: opt.concurrency || 1, // Worker pool size
+            tasksPerWorker: opt.tasksPerWorker || 1,
             contextMode: opt.contextMode || null, // Auto-detect if null
             onItem: opt.onItem || (() => {}),
             ...opt
@@ -32,11 +33,11 @@ export class ScrapingExecution {
     }
 
     static withOptions(opt = {}) {
-        return new ScrapingExecution(opt)
+        return new Scraper(opt)
     }
 
     copy() {
-        const newInstance = new ScrapingExecution(this.opt)
+        const newInstance = new Scraper(this.opt)
         newInstance.drivers = this.drivers
         newInstance.workerPool = this.workerPool
         newInstance.navigationLock = this.navigationLock
@@ -97,11 +98,16 @@ export class ScrapingExecution {
 
         // Create worker pool if not exists
         if (!this.workerPool) {
-            this.workerPool = new WorkerPool(this.opt.size, this.navigationLock)
+            this.workerPool = new WorkerPool(
+                this.opt.concurrency, 
+                this.navigationLock,
+                { tasksPerWorker: this.opt.tasksPerWorker }
+            )
             await this.workerPool.start()
 
             log.success('Worker pool started', {
-                size: this.opt.size
+                concurrency: this.opt.concurrency,
+                tasksPerWorker: this.opt.tasksPerWorker
             })
         }
     }
@@ -110,6 +116,7 @@ export class ScrapingExecution {
      * Search for manga across connectors
      */
     async search(title, connector_id = '*', opt = {}) {
+        const startTime = Date.now()
         const { sequential = false, deep = false } = opt
 
         // Determine which connectors to use
@@ -125,7 +132,7 @@ export class ScrapingExecution {
             connectors: connectorIds,
             mode: sequential ? 'sequential' : 'parallel',
             deep,
-            workerSize: this.opt.size
+            concurrency: this.opt.concurrency
         })
 
         // Create search tasks for each connector
@@ -172,8 +179,10 @@ export class ScrapingExecution {
         }
 
         const totalResults = finalResults.reduce((sum, r) => sum + (r.count || 0), 0)
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2)
 
         log.success('Search completed', {
+            duration: `${duration}s`,
             title,
             connectors: finalResults.length,
             totalResults
@@ -191,14 +200,13 @@ export class ScrapingExecution {
         return TaskFactory.search(connectorId, title, {
             execute: async () => {
                 try {
+                    if (this.navigationLock.contextMode === ContextMode.MULTI) {
+                        const proxy = this.navigationLock.getNextProxy()
+                        await this.drivers.build(connectorId, proxy)
+                    }
+                    
                     // Navigate to search page (lock handled by worker)
                     await this.drivers.exec(connectorId, async (driver) => {
-                        // Check if multi-context mode and recreate context
-                        if (this.navigationLock.contextMode === ContextMode.MULTI) {
-                            const proxy = this.navigationLock.getNextProxy()
-                            await this.drivers.build(connectorId, proxy)
-                        }
-
                         const searchUrl = driver.getSearchUrl(title)
                         await driver.page.goto(searchUrl.render(), {
                             waitUntil: 'domcontentloaded',
@@ -289,14 +297,13 @@ export class ScrapingExecution {
                 try {
                     log.debug('Deep search entry', { connector: connectorId, item })
 
+                    if (this.navigationLock.contextMode === ContextMode.MULTI) {
+                        const proxy = this.navigationLock.getNextProxy()
+                        await this.drivers.build(connectorId, proxy)
+                    }
+
                     // Navigate to detail page (lock handled by worker)
                     await this.drivers.exec(connectorId, async (driver) => {
-                        // Multi-context: recreate context with new proxy
-                        if (this.navigationLock.contextMode === ContextMode.MULTI) {
-                            const proxy = this.navigationLock.getNextProxy()
-                            await this.drivers.build(connectorId, proxy)
-                        }
-
                         await driver.page.goto(item.link, {
                             waitUntil: 'domcontentloaded',
                             timeout: 30000
@@ -343,7 +350,8 @@ export class ScrapingExecution {
      * Process manga (scrape chapters)
      */
     async process(method, mode, opt = {}) {
-        const { target, title, size } = opt
+        const startTime = Date.now()
+        const { target, title, concurrency } = opt
 
         if (!target) {
             throw new Error("Target URL is required")
@@ -355,19 +363,19 @@ export class ScrapingExecution {
         // Initialize with specific connector
         await this._initialize([connectorId])
 
-        // Override worker size if specified
-        if (size && size !== this.opt.size) {
+        // Override worker concurrency if specified
+        if (concurrency && concurrency !== this.opt.concurrency) {
             await this.workerPool.stop()
             this.workerPool = new WorkerPool(size, this.navigationLock)
             await this.workerPool.start()
-            this.opt.size = size
+            this.opt.concurrency = concurrency
         }
 
         log.info('Starting process', {
             method,
             mode,
             title,
-            size: this.opt.size,
+            concurrency: this.opt.concurrency,
             target
         })
 
@@ -418,6 +426,18 @@ export class ScrapingExecution {
             results = await this.workerPool.submitAll(chapterTasks)
         }
 
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2)
+        const totalPages = results.reduce((sum, r) => sum + (r.pages?.length || 0), 0)
+
+        log.success('Process completed', {
+            duration: `${duration}s`,
+            connector: connectorId,
+            chaptersProcessed: results.length,
+            totalPages,
+            mode,
+            avgTimePerChapter: results.length > 0 ? (parseFloat(duration) / results.length).toFixed(2) + 's' : 'N/A' // NEW: Average time
+        })
+
         return results
     }
 
@@ -436,14 +456,12 @@ export class ScrapingExecution {
                 })
 
                 try {
+                    if (this.navigationLock.contextMode === ContextMode.MULTI) {
+                        const proxy = this.navigationLock.getNextProxy()
+                        await this.drivers.build(connectorId, proxy)
+                    }
                     // Navigate to chapter (lock handled by worker)
                     await this.drivers.exec(connectorId, async (driver) => {
-                        // Multi-context: recreate context
-                        if (this.navigationLock.contextMode === ContextMode.MULTI) {
-                            const proxy = this.navigationLock.getNextProxy()
-                            await this.drivers.build(connectorId, proxy)
-                        }
-
                         await driver.page.goto(chapterUrl.render(), {
                             waitUntil: 'networkidle',
                             timeout: 30000
@@ -551,18 +569,31 @@ export class ScrapingExecution {
         return this.drivers && this.drivers.isValid()
     }
 
-    /**
-     * Set option
-     */
     setOption(key, value) {
         this.opt[key] = value
 
-        // Handle specific option changes
-        if (key === 'size') {
-            // Worker pool size change requires restart
+        if (key === 'concurrency') {
+            const newConcurrency = value
+            this.opt.concurrency = newConcurrency
             if (this.workerPool) {
                 this.workerPool.stop().then(() => {
-                    this.workerPool = new WorkerPool(value, this.navigationLock)
+                    this.workerPool = new WorkerPool(
+                        newConcurrency, 
+                        this.navigationLock,
+                        { tasksPerWorker: this.opt.tasksPerWorker }
+                    )
+                    return this.workerPool.start()
+                })
+            }
+        } else if (key === 'tasksPerWorker') {
+            // Restart worker pool with new limit
+            if (this.workerPool) {
+                this.workerPool.stop().then(() => {
+                    this.workerPool = new WorkerPool(
+                        this.opt.concurrency, 
+                        this.navigationLock,
+                        { tasksPerWorker: value }
+                    )
                     return this.workerPool.start()
                 })
             }
@@ -573,9 +604,6 @@ export class ScrapingExecution {
         }
     }
 
-    /**
-     * Get status
-     */
     getStatus() {
         return {
             initialized: this.isValid(),
@@ -583,7 +611,8 @@ export class ScrapingExecution {
             workers: this.workerPool?.getStatus(),
             navigation: this.navigationLock?.getStatus(),
             options: {
-                size: this.opt.size,
+                concurrency: this.opt.concurrency,
+                tasksPerWorker: this.opt.tasksPerWorker,
                 contextMode: this.opt.contextMode
             }
         }

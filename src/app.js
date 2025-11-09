@@ -1,7 +1,7 @@
-import { ScrapingExecution } from "./scrape.js"
+import { Scraper } from "./scrape.js"
 
 ;(async () => {
-    let execution = new ScrapingExecution()
+    let execution = new Scraper()
     const { results } = await execution.search('GTO', 'mangaworld')
     console.log('Results', results)
 

@@ -63,12 +63,13 @@ export class TaskQueue {
  * Executes tasks from queue
  */
 class Worker {
-    constructor(id, taskQueue, navigationLock) {
+    constructor(id, taskQueue, navigationLock, options = {}) {
         this.id = id
         this.taskQueue = taskQueue
         this.navigationLock = navigationLock
+        this.tasksPerWorker = options.tasksPerWorker || 1
         this.running = false
-        this.currentTask = null
+        this.activeTasks = new Set()
         this.stats = {
             tasksCompleted: 0,
             tasksError: 0,
@@ -81,8 +82,29 @@ class Worker {
      */
     async start() {
         this.running = true
-        log.debug('Worker started', { workerId: this.id })
+        log.debug('Worker started', { 
+            workerId: this.id, 
+            tasksPerWorker: this.tasksPerWorker 
+        })
 
+        // Start multiple task processors based on tasksPerWorker
+        const processors = []
+        for (let i = 0; i < this.tasksPerWorker; i++) {
+            processors.push(this._taskProcessor(i))
+        }
+
+        await Promise.all(processors)
+
+        log.debug('Worker stopped', { 
+            workerId: this.id,
+            stats: this.stats
+        })
+    }
+
+    /**
+     * Runs in parallel (one per slot)
+     */
+    async _taskProcessor(slotId) {
         while (this.running) {
             try {
                 // Get next task (blocks if queue empty)
@@ -92,7 +114,9 @@ class Worker {
                     break
                 }
 
-                this.currentTask = task
+                // Track active task
+                const taskId = `${this.id}-${slotId}-${Date.now()}`
+                this.activeTasks.add(taskId)
 
                 const startTime = Date.now()
                 
@@ -106,6 +130,7 @@ class Worker {
                     this.stats.tasksError++
                     log.error('Task execution failed', error, {
                         workerId: this.id,
+                        slotId,
                         taskType: task.type
                     })
                     
@@ -113,18 +138,16 @@ class Worker {
                     if (task.reject) {
                         task.reject(error)
                     }
+                } finally {
+                    this.activeTasks.delete(taskId)
                 }
-
-                this.currentTask = null
             } catch (error) {
-                log.error('Worker loop error', error, { workerId: this.id })
+                log.error('Worker processor error', error, { 
+                    workerId: this.id, 
+                    slotId 
+                })
             }
         }
-
-        log.debug('Worker stopped', { 
-            workerId: this.id,
-            stats: this.stats
-        })
     }
 
     /**
@@ -134,7 +157,8 @@ class Worker {
         log.debug('Worker executing task', {
             workerId: this.id,
             taskType: task.type,
-            connector: task.connector
+            connector: task.connector,
+            activeTaskCount: this.activeTasks.size
         })
 
         // Acquire navigation lock if task requires page navigation
@@ -174,11 +198,9 @@ class Worker {
         return {
             id: this.id,
             running: this.running,
-            busy: !!this.currentTask,
-            currentTask: this.currentTask ? {
-                type: this.currentTask.type,
-                connector: this.currentTask.connector
-            } : null,
+            busy: this.activeTasks.size > 0,
+            activeTasks: this.activeTasks.size,
+            maxTasks: this.tasksPerWorker,
             stats: { ...this.stats }
         }
     }
@@ -188,10 +210,13 @@ class Worker {
  * Manages worker threads
  */
 export class WorkerPool {
-    constructor(size, navigationLock) {
+    constructor(size, navigationLock, options = {}) {
         this.size = size
         this.taskQueue = new TaskQueue()
         this.navigationLock = navigationLock
+        this.options = {
+            tasksPerWorker: options.tasksPerWorker || 1
+        }
         this.workers = []
         this.running = false
     }
@@ -209,7 +234,12 @@ export class WorkerPool {
 
         // Create and start workers
         for (let i = 0; i < this.size; i++) {
-            const worker = new Worker(i, this.taskQueue, this.navigationLock)
+            const worker = new Worker(
+                i, 
+                this.taskQueue, 
+                this.navigationLock,
+                { tasksPerWorker: this.options.tasksPerWorker }
+            )
             this.workers.push(worker)
             
             // Start worker (non-blocking)
@@ -219,7 +249,9 @@ export class WorkerPool {
         }
 
         log.success('Worker pool started', { 
-            workerCount: this.size 
+            workerCount: this.size,
+            tasksPerWorker: this.options.tasksPerWorker,
+            totalCapacity: this.size * this.options.tasksPerWorker
         })
     }
 
@@ -287,25 +319,23 @@ export class WorkerPool {
     /**
      * Get aggregated stats
      */
-    getStats() {
-        const stats = {
-            totalTasksCompleted: 0,
-            totalTasksError: 0,
-            totalTime: 0,
-            avgTimePerTask: 0
+    getStatus() {
+        const totalActiveTasks = this.workers.reduce(
+            (sum, w) => sum + w.activeTasks.size, 
+            0
+        )
+        const maxCapacity = this.size * this.options.tasksPerWorker
+
+        return {
+            size: this.size,
+            running: this.running,
+            queueSize: this.taskQueue.size(),
+            tasksPerWorker: this.options.tasksPerWorker,
+            totalCapacity: maxCapacity,
+            activeTasks: totalActiveTasks,
+            workers: this.workers.map(w => w.getStatus()),
+            busyWorkers: this.workers.filter(w => w.activeTasks.size > 0).length
         }
-
-        this.workers.forEach(worker => {
-            stats.totalTasksCompleted += worker.stats.tasksCompleted
-            stats.totalTasksError += worker.stats.tasksError
-            stats.totalTime += worker.stats.totalTime
-        })
-
-        if (stats.totalTasksCompleted > 0) {
-            stats.avgTimePerTask = (stats.totalTime / stats.totalTasksCompleted).toFixed(0)
-        }
-
-        return stats
     }
 }
 

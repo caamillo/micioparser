@@ -84,11 +84,6 @@ export class NavigationLock {
         // Apply rate limiting
         const rateLimiter = this._getRateLimiter(connector)
         await rateLimiter.throttle()
-
-        // Handle context switching based on mode
-        if (this.contextMode === ContextMode.MULTI) {
-            await this._handleMultiContext(connector)
-        }
     }
 
     /**
@@ -114,21 +109,6 @@ export class NavigationLock {
         log.debug('Navigation lock released', { 
             connector,
             queueLength: lockState.queue.length
-        })
-    }
-
-    /**
-     * Handle multi-context mode (context + proxy rotation)
-     */
-    async _handleMultiContext(connector) {
-        // In multi-context mode, we should:
-        // 1. Close current context if exists
-        // 2. Create new context with rotated proxy
-        // This will be handled by the driver pool when it detects multi-context mode
-        
-        log.debug('Multi-context navigation', { 
-            connector,
-            nextProxy: this.proxyPool?.getProxy()?.server || 'none'
         })
     }
 
