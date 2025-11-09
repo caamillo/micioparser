@@ -32,13 +32,13 @@ jobs:
         echo $! > server.pid
       env:
         NODE_ENV: test
-        PORT: 3001
+        PORT: 3006
     
     - name: Search Test
       run: |
-        curl -f http://localhost:3001/search/GTO || exit 1
+        curl -f http://localhost:3006/search/GTO || exit 1
       env:
-        API_URL: http://localhost:3001
+        API_URL: http://localhost:3006
     
     - name: Stop server
       if: always()
