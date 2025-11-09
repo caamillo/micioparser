@@ -5,8 +5,8 @@ import { ContextMode } from "../src/navigation.js"
 import log from '../src/log.js'
 
 const DEFAULT_OPTIONS = {
-    concurrency: 5,
-    tasksPerWorker: 5,
+    concurrency: 2,
+    tasksPerWorker: 1,
 }
 
 let globalExecution = Scraper.withOptions(DEFAULT_OPTIONS)
